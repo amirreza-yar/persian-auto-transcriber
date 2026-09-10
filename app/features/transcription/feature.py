@@ -1,4 +1,5 @@
 import json
+import logging
 import math
 import tempfile
 from pathlib import Path
@@ -9,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.events import add_event
-from app.core.runtime_settings import get_all_settings, get_setting
+from app.core.runtime_settings import get_all_settings, get_setting, make_job_config
 from app.db import SessionLocal
 from app.models import Job, Task
 from app.services.audio import extract_window
@@ -17,6 +18,9 @@ from app.services.network import apply_proxy_environment
 from app.services.storage import register_text_artifact, work_dir
 from app.services.task_queue import enqueue_task, heartbeat
 from app.workers.exceptions import JobCancelled, JobPaused
+
+
+logger = logging.getLogger("transcriber")
 
 
 class TranscriptionFeature:
@@ -31,35 +35,46 @@ class TranscriptionFeature:
     def _config(self, db: Session, job: Job) -> dict:
         if job.transcription_config:
             return json.loads(job.transcription_config)
-        values = get_all_settings(db)
-        config = {
-            "model": values["transcription.model"],
-            "core_seconds": int(values["transcription.core_seconds"]),
-            "context_seconds": int(values["transcription.context_seconds"]),
-            "cpu_threads": int(values["transcription.cpu_threads"]),
-            "beam_size": int(values["transcription.beam_size"]),
-        }
+        config = make_job_config(db, "transcription")
         job.transcription_config = json.dumps(config, ensure_ascii=False)
         db.commit()
         return config
 
     def _ensure_model(self, config: dict, proxy_url: str) -> WhisperModel:
-        key = (config["model"], config["cpu_threads"])
+        key = (str(config["model"]), int(config["cpu_threads"]))
         if self.model is not None and self.model_key == key:
             return self.model
 
         apply_proxy_environment(proxy_url)
         settings.model_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Loading Whisper model %s from %s", config["model"], settings.model_dir)
         self.model = WhisperModel(
             config["model"],
             device="cpu",
             compute_type="int8",
-            cpu_threads=config["cpu_threads"],
+            cpu_threads=int(config["cpu_threads"]),
             num_workers=1,
             download_root=str(settings.model_dir),
+            local_files_only=settings.whisper_local_files_only,
         )
         self.model_key = key
+        logger.info("Whisper model ready: %s", config["model"])
         return self.model
+
+    def warmup(self) -> str:
+        with SessionLocal() as db:
+            config = make_job_config(db, "transcription")
+            self._ensure_model(config, get_setting(db, "network.proxy_url"))
+            return str(config["model"])
+
+    def prepare(self, task_id: str) -> str:
+        with SessionLocal() as db:
+            task = db.get(Task, task_id)
+            if not task:
+                raise RuntimeError("Task disappeared before transcription preparation")
+            config = self._config(db, task.job)
+            self._ensure_model(config, get_setting(db, "network.proxy_url"))
+            return str(config["model"])
 
     def run(self, task_id: str) -> None:
         with SessionLocal() as db:
@@ -69,18 +84,17 @@ class TranscriptionFeature:
             job = task.job
             config = self._config(db, job)
             model = self._ensure_model(config, get_setting(db, "network.proxy_url"))
-            add_event(db, "Transcription started", job.id)
+            add_event(db, "Transcription started", job.id, event_type="job.stage", data={"stage": "transcribe"})
             job.stage = "transcribe"
             db.commit()
 
             chunk_dir = work_dir(job.id, "transcription") / "chunks"
             chunk_dir.mkdir(parents=True, exist_ok=True)
             duration = float(job.duration_seconds or 0)
-            core = config["core_seconds"]
-            context = config["context_seconds"]
+            core = int(config["core_seconds"])
+            context = int(config["context_seconds"])
             total_chunks = max(1, math.ceil(duration / core))
             parts: list[str] = []
-            last_event_bucket = -1
 
             with tempfile.TemporaryDirectory() as tmp:
                 tmp_path = Path(tmp)
@@ -106,7 +120,7 @@ class TranscriptionFeature:
                             str(temp_audio),
                             language="fa",
                             task="transcribe",
-                            beam_size=config["beam_size"],
+                            beam_size=int(config["beam_size"]),
                             temperature=0.0,
                             condition_on_previous_text=False,
                             vad_filter=False,
@@ -132,11 +146,6 @@ class TranscriptionFeature:
 
                     stage_progress = (index + 1) / total_chunks
                     heartbeat(db, task, stage_progress, stage_progress * 0.85)
-                    bucket = int(stage_progress * 10)
-                    if bucket > last_event_bucket:
-                        last_event_bucket = bucket
-                        add_event(db, f"Transcription {int(stage_progress * 100)}%", job.id)
-                        db.commit()
 
             raw_text = "\n".join(parts)
             normalized_text = self.normalizer.normalize(raw_text)
@@ -144,13 +153,13 @@ class TranscriptionFeature:
             register_text_artifact(db, job.id, "raw_text", f"{stem}_raw.txt", raw_text)
             register_text_artifact(db, job.id, "normalized_text", f"{stem}_normalized.txt", normalized_text)
 
-            values = get_all_settings(db)
-            if values["cleaning.enabled"]:
+            cleaning_config = json.loads(job.cleaning_config) if job.cleaning_config else make_job_config(db, "cleaning")
+            if cleaning_config.get("enabled", True):
                 enqueue_task(db, job.id, "clean_text", "network")
                 job.stage = "clean"
                 job.status = "queued"
                 job.progress = 0.85
-                add_event(db, "Transcription completed; cleaning queued", job.id)
+                add_event(db, "Transcription completed; cleaning queued", job.id, event_type="job.stage", data={"stage": "clean", "status": "queued", "progress": 0.85})
             else:
                 register_text_artifact(db, job.id, "final_text", f"{stem}.txt", normalized_text)
                 job.stage = "done"
@@ -158,5 +167,5 @@ class TranscriptionFeature:
                 job.progress = 1.0
                 from app.db import utcnow
                 job.completed_at = utcnow()
-                add_event(db, "Job completed", job.id)
+                add_event(db, "Job completed", job.id, event_type="job.completed", data={"progress": 1.0})
             db.commit()

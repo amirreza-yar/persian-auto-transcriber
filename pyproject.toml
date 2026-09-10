@@ -1,6 +1,6 @@
 [project]
 name = "persian-stt-backend"
-version = "0.1.0"
+version = "2.0.0"
 description = "Local Persian speech-to-text job service"
 requires-python = ">=3.13,<3.14"
 dependencies = [
@@ -12,6 +12,7 @@ dependencies = [
     "httpx[socks]>=0.28,<1",
     "pydantic-settings>=2.10,<3",
     "python-multipart>=0.0.20,<1",
+    "psutil>=7,<8",
     "sqlalchemy>=2.0.52,<2.1",
     "uvicorn[standard]>=0.35,<1",
 ]

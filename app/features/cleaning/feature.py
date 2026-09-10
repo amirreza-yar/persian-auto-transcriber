@@ -12,6 +12,7 @@ from app.core.runtime_settings import get_all_settings, get_setting
 from app.db import SessionLocal, utcnow
 from app.features.cleaning.prompt import SYSTEM_PROMPT
 from app.models import Artifact, Job, Task
+from app.services.circuit_breaker import allow_request, get_circuit, record_circuit_failure, record_circuit_success
 from app.services.network import validate_proxy
 from app.services.storage import register_text_artifact, work_dir
 from app.services.task_queue import heartbeat
@@ -55,6 +56,9 @@ class CleaningFeature:
             "retry_base_seconds": int(values["cleaning.retry_base_seconds"]),
             "request_timeout_seconds": int(values["cleaning.request_timeout_seconds"]),
             "token_cooldown_seconds": int(values["cleaning.token_cooldown_seconds"]),
+            "enabled": bool(values["cleaning.enabled"]),
+            "circuit_failure_threshold": int(values["circuit.gemini.failure_threshold"]),
+            "circuit_cooldown_seconds": int(values["circuit.gemini.cooldown_seconds"]),
         }
         job.cleaning_config = json.dumps(config, ensure_ascii=False)
         db.commit()
@@ -77,7 +81,8 @@ class CleaningFeature:
             if not task:
                 return
             job = task.job
-            if not job.cleaning_config and not get_all_settings(db)["cleaning.enabled"]:
+            existing_config = json.loads(job.cleaning_config) if job.cleaning_config else None
+            if existing_config is not None and not existing_config.get("enabled", True):
                 artifact = db.query(Artifact).filter(
                     Artifact.job_id == job.id,
                     Artifact.kind == "normalized_text",
@@ -143,6 +148,11 @@ class CleaningFeature:
             db.commit()
 
     def _clean_chunk(self, db: Session, chunk: str, config: dict) -> str:
+        allowed, wait_seconds = allow_request(db, "gemini")
+        if not allowed:
+            circuit = get_circuit(db, "gemini")
+            raise RetryLater(f"Gemini circuit is open: {circuit.last_error or 'provider unavailable'}", wait_seconds)
+
         attempts = max(1, config["retry_count"] + 1)
         last_error = "No Gemini token available"
 
@@ -168,7 +178,13 @@ class CleaningFeature:
                 prompt_tokens = int(getattr(usage, "prompt_token_count", 0) or 0) if usage else 0
                 response_tokens = int(getattr(usage, "response_token_count", 0) or 0) if usage else 0
                 total_tokens = int(getattr(usage, "total_token_count", 0) or 0) if usage else 0
+                previous_state = get_circuit(db, "gemini").state
                 record_success(db, token, prompt_tokens, response_tokens, total_tokens)
+                record_circuit_success(db, "gemini")
+                db.commit()
+                if previous_state != "closed":
+                    add_event(db, "Gemini circuit recovered", event_type="circuit.status", data={"name": "gemini", "state": "closed"})
+                    db.commit()
                 client.close()
                 return cleaned
 
@@ -178,9 +194,18 @@ class CleaningFeature:
                 disable = code == 401
                 cooldown = config["token_cooldown_seconds"] if code in (403, 429) else config["retry_base_seconds"]
                 record_failure(db, token, last_error, cooldown_seconds=cooldown, disable=disable)
+                if code == 429 or code >= 500:
+                    circuit = record_circuit_failure(db, "gemini", last_error, config["circuit_failure_threshold"], config["circuit_cooldown_seconds"])
+                    if circuit.state == "open":
+                        add_event(db, "Gemini circuit opened", level="warning", event_type="circuit.status", data={"name": "gemini", "state": "open", "opened_until": circuit.opened_until.isoformat() if circuit.opened_until else None})
+                    db.commit()
             except Exception as exc:
                 last_error = f"Gemini network/error: {exc}"
                 record_failure(db, token, last_error, cooldown_seconds=config["retry_base_seconds"])
+                circuit = record_circuit_failure(db, "gemini", last_error, config["circuit_failure_threshold"], config["circuit_cooldown_seconds"])
+                if circuit.state == "open":
+                    add_event(db, "Gemini circuit opened", level="warning", event_type="circuit.status", data={"name": "gemini", "state": "open", "opened_until": circuit.opened_until.isoformat() if circuit.opened_until else None})
+                db.commit()
 
             if attempt + 1 < attempts:
                 time.sleep(min(config["retry_base_seconds"] * (2 ** attempt), 60))

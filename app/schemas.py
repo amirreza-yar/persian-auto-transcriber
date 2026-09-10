@@ -35,6 +35,15 @@ class JobOut(BaseModel):
     original_name: str
     duration_seconds: float | None
     size_bytes: int
+    source_mime_type: str | None
+    source_format: str | None
+    source_codec: str | None
+    sample_rate: int | None
+    channels: int | None
+    bit_rate: int | None
+    source_available: bool
+    description: str | None
+    tags: list[str] = Field(default_factory=list)
     status: str
     stage: str
     progress: float
@@ -44,6 +53,8 @@ class JobOut(BaseModel):
     is_paused: bool
     cancel_requested: bool
     error: str | None
+    transcription_config: dict[str, Any] | None = None
+    cleaning_config: dict[str, Any] | None = None
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None
@@ -59,6 +70,59 @@ class JobPatch(BaseModel):
 
 class ReorderRequest(BaseModel):
     job_ids: list[str] = Field(min_length=1)
+
+
+class JobHistoryPage(BaseModel):
+    total: int
+    offset: int
+    limit: int
+    items: list[JobOut]
+
+
+class BatchPatch(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
+class BatchOut(BaseModel):
+    id: str
+    name: str | None
+    description: str | None
+    status: str
+    progress: float
+    total_jobs: int
+    completed_jobs: int
+    failed_jobs: int
+    running_jobs: int
+    queued_jobs: int
+    created_at: datetime
+    updated_at: datetime
+    jobs: list[JobOut] = Field(default_factory=list)
+
+
+class AudioFileOut(BaseModel):
+    id: str
+    job_id: str
+    batch_id: str
+    name: str
+    duration_seconds: float | None
+    size_bytes: int
+    mime_type: str | None
+    format: str | None
+    codec: str | None
+    sample_rate: int | None
+    channels: int | None
+    bit_rate: int | None
+    source_available: bool
+    description: str | None
+    tags: list[str]
+    job_status: str
+    created_at: datetime
+
+
+class AudioFilePatch(BaseModel):
+    description: str | None = None
+    tags: list[str] | None = None
 
 
 class SettingsPatch(BaseModel):
@@ -115,6 +179,37 @@ class EventOut(BaseModel):
 
     id: int
     job_id: str | None
+    batch_id: str | None
+    event_type: str
     level: str
     message: str
+    data: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+
+
+class WorkerStateOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    queue: str
+    status: str
+    current_job_id: str | None
+    model_name: str | None
+    detail: str | None
+    started_at: datetime
+    heartbeat_at: datetime
+    updated_at: datetime
+    stale: bool = False
+
+
+class CircuitBreakerOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str
+    state: str
+    consecutive_failures: int
+    opened_until: datetime | None
+    last_error: str | None
+    last_failure_at: datetime | None
+    last_success_at: datetime | None
+    updated_at: datetime

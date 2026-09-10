@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import artifacts, events, jobs, settings as settings_api, system, tokens
+from app.api import artifacts, batches, events, files, jobs, settings as settings_api, system, tokens
 from app.core.runtime_settings import bootstrap_settings
 from app.db import Base, SessionLocal, engine
 
@@ -16,7 +16,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Persian STT Backend", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Persian STT Backend", version="2.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,6 +27,8 @@ app.add_middleware(
 
 app.include_router(system.router, prefix="/api")
 app.include_router(jobs.router, prefix="/api")
+app.include_router(batches.router, prefix="/api")
+app.include_router(files.router, prefix="/api")
 app.include_router(artifacts.router, prefix="/api")
 app.include_router(settings_api.router, prefix="/api")
 app.include_router(tokens.router, prefix="/api")

@@ -25,6 +25,11 @@ DEFAULTS: dict[str, Any] = {
     "worker.max_attempts": 3,
     "worker.retry_base_seconds": 30,
     "worker.stale_after_seconds": 300,
+    "upload.max_bytes": 150 * 1024 * 1024,
+    "upload.max_duration_seconds": 6 * 60 * 60,
+    "circuit.gemini.failure_threshold": 4,
+    "circuit.gemini.cooldown_seconds": 300,
+    "system.stream_interval_seconds": 2,
 }
 
 
@@ -38,10 +43,34 @@ VALIDATORS = {
     "cleaning.retry_base_seconds": lambda v: 1 <= int(v) <= 3600,
     "cleaning.request_timeout_seconds": lambda v: 10 <= int(v) <= 1800,
     "cleaning.token_cooldown_seconds": lambda v: 10 <= int(v) <= 86400,
-    "worker.poll_seconds": lambda v: 1 <= int(v) <= 60,
+    "worker.poll_seconds": lambda v: 0.5 <= float(v) <= 60,
     "worker.max_attempts": lambda v: 1 <= int(v) <= 20,
     "worker.retry_base_seconds": lambda v: 1 <= int(v) <= 3600,
     "worker.stale_after_seconds": lambda v: 30 <= int(v) <= 86400,
+    "upload.max_bytes": lambda v: 1024 * 1024 <= int(v) <= 10 * 1024 * 1024 * 1024,
+    "upload.max_duration_seconds": lambda v: 60 <= int(v) <= 48 * 60 * 60,
+    "circuit.gemini.failure_threshold": lambda v: 1 <= int(v) <= 50,
+    "circuit.gemini.cooldown_seconds": lambda v: 10 <= int(v) <= 86400,
+    "system.stream_interval_seconds": lambda v: 1 <= float(v) <= 30,
+}
+
+
+TRANSCRIPTION_KEYS = {
+    "model": "transcription.model",
+    "core_seconds": "transcription.core_seconds",
+    "context_seconds": "transcription.context_seconds",
+    "cpu_threads": "transcription.cpu_threads",
+    "beam_size": "transcription.beam_size",
+}
+
+CLEANING_KEYS = {
+    "enabled": "cleaning.enabled",
+    "model": "cleaning.model",
+    "chunk_chars": "cleaning.chunk_chars",
+    "retry_count": "cleaning.retry_count",
+    "retry_base_seconds": "cleaning.retry_base_seconds",
+    "request_timeout_seconds": "cleaning.request_timeout_seconds",
+    "token_cooldown_seconds": "cleaning.token_cooldown_seconds",
 }
 
 
@@ -71,7 +100,7 @@ def set_setting(db: Session, key: str, value: Any) -> None:
     if key not in DEFAULTS:
         raise ValueError(f"Unknown setting: {key}")
     if key == "network.proxy_url" and value:
-        if not str(value).startswith("socks5://"):
+        if not str(value).startswith(("socks5://", "socks5h://")):
             raise ValueError("network.proxy_url must be a SOCKS5 URL")
     validator = VALIDATORS.get(key)
     if validator and not validator(value):
@@ -82,3 +111,18 @@ def set_setting(db: Session, key: str, value: Any) -> None:
         row.value = encoded
     else:
         db.add(AppSetting(key=key, value=encoded))
+
+
+def make_job_config(db: Session, section: str, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    values = get_all_settings(db)
+    mapping = TRANSCRIPTION_KEYS if section == "transcription" else CLEANING_KEYS
+    config = {name: values[key] for name, key in mapping.items()}
+    for name, value in (overrides or {}).items():
+        if name not in mapping:
+            raise ValueError(f"Unknown {section} override: {name}")
+        global_key = mapping[name]
+        validator = VALIDATORS.get(global_key)
+        if validator and not validator(value):
+            raise ValueError(f"Invalid {section} override: {name}")
+        config[name] = value
+    return config
