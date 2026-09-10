@@ -8,11 +8,11 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_db
 from app.core.events import add_event
-from app.core.runtime_settings import get_all_settings, make_job_config
+from app.core.runtime_settings import get_all_settings, make_job_config, merge_job_config
 from app.db import utcnow
 from app.models import Batch, Job
-from app.schemas import JobHistoryPage, JobOut, JobPatch, ReorderRequest
-from app.services.audio import AudioValidationError, validate_audio
+from app.schemas import JobHistoryPage, JobOut, JobPatch, JobSettingsPatch, ReorderRequest
+from app.services.audio import AudioValidationError, guess_audio_mime, validate_audio
 from app.services.presenters import job_to_out
 from app.services.storage import delete_job_files, save_upload
 from app.services.task_queue import enqueue_task
@@ -152,7 +152,7 @@ def upload_jobs(
                 source_path=str(source),
                 duration_seconds=metadata["duration_seconds"],
                 size_bytes=size,
-                source_mime_type=upload.content_type,
+                source_mime_type=guess_audio_mime(source, upload.content_type),
                 source_format=metadata["format"],
                 source_codec=metadata["codec"],
                 sample_rate=metadata["sample_rate"],
@@ -265,6 +265,47 @@ def reorder_jobs(body: ReorderRequest, db: Session = Depends(get_db)):
     return [job_to_out(job) for job in result]
 
 
+@router.patch("/{job_id}/settings", response_model=JobOut)
+def update_job_settings(job_id: str, body: JobSettingsPatch, db: Session = Depends(get_db)):
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    try:
+        if body.transcription is not None:
+            transcribe_started = any(
+                task.kind == "transcribe" and task.status in ("claimed", "running", "completed")
+                for task in job.tasks
+            )
+            if transcribe_started:
+                raise HTTPException(409, "Transcription settings cannot change after transcription starts")
+            current = json.loads(job.transcription_config) if job.transcription_config else make_job_config(db, "transcription")
+            job.transcription_config = json.dumps(merge_job_config(db, "transcription", current, body.transcription), ensure_ascii=False)
+        if body.cleaning is not None:
+            cleaning_started = any(
+                task.kind == "clean_text" and task.status in ("claimed", "running", "completed")
+                for task in job.tasks
+            )
+            if cleaning_started:
+                raise HTTPException(409, "Cleaning settings cannot change after cleaning starts")
+            current = json.loads(job.cleaning_config) if job.cleaning_config else make_job_config(db, "cleaning")
+            updated = merge_job_config(db, "cleaning", current, body.cleaning)
+            job.cleaning_config = json.dumps(updated, ensure_ascii=False)
+            transcribe_done = any(task.kind == "transcribe" and task.status == "completed" for task in job.tasks)
+            clean_exists = any(task.kind == "clean_text" for task in job.tasks)
+            if updated.get("enabled", True) and transcribe_done and not clean_exists:
+                enqueue_task(db, job.id, "clean_text", "network")
+                job.status = "queued"
+                job.stage = "clean"
+                job.progress = 0.85
+                job.completed_at = None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    add_event(db, "Job settings updated", job.id, event_type="job.settings")
+    db.commit()
+    job = db.scalar(_job_stmt().where(Job.id == job_id))
+    return job_to_out(job)
+
+
 @router.post("/{job_id}/pause", response_model=JobOut)
 def pause_job(job_id: str, db: Session = Depends(get_db)):
     job = db.get(Job, job_id)
@@ -337,7 +378,7 @@ def retry_job(job_id: str, db: Session = Depends(get_db)):
             task.status = "queued"
             task.next_run_at = now
             task.last_error = None
-    elif not any(task.status in ("queued", "running") for task in job.tasks):
+    elif not any(task.status in ("claimed", "queued", "running") for task in job.tasks):
         kind = "clean_text" if job.stage == "clean" else "transcribe"
         queue = "network" if kind == "clean_text" else "transcribe"
         enqueue_task(db, job.id, kind, queue, now)

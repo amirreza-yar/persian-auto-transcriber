@@ -1,6 +1,6 @@
 import asyncio
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, Query
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -40,9 +40,14 @@ async def stream_events(
     after_id: int = 0,
     job_id: str | None = None,
     batch_id: str | None = None,
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
 ):
     async def generate():
-        last_id = after_id
+        try:
+            resumed_id = int(last_event_id) if last_event_id is not None else 0
+        except ValueError:
+            resumed_id = 0
+        last_id = max(after_id, resumed_id)
         while True:
             with SessionLocal() as db:
                 stmt = select(Event).where(Event.id > last_id)

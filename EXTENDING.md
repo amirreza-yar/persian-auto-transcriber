@@ -1,6 +1,8 @@
-# Adding a feature
+# Extending the backend
 
-A feature is a task handler with a task kind and a worker queue.
+The backend uses generic task queues and artifacts so new text/media features do not need a second scheduler.
+
+## Feature handler
 
 ```python
 class SummaryFeature:
@@ -11,35 +13,52 @@ class SummaryFeature:
         ...
 ```
 
-Register it in `app/features/load.py` and enqueue it with `enqueue_task()`.
+Register the feature in `app/features/load.py`, then enqueue it with `enqueue_task()`.
 
-Use the existing pieces rather than creating feature-specific infrastructure:
+Use:
 
-- `tasks` for scheduling, retries, progress and worker ownership
-- `artifacts` for generated files
-- `events` for frontend-visible logs
-- `app_settings` for runtime configuration
-- `api_tokens` for external model credentials and usage
+- `jobs` for the user-visible unit of work.
+- `batches` for grouped uploads/control.
+- `tasks` for worker scheduling/retries/checkpoints.
+- `artifacts` for generated TXT/JSON/SRT/VTT or future output files.
+- `events` for persisted frontend-visible state changes and SSE.
+- `worker_states` for readiness/resource ownership.
+- `circuit_breakers` for provider-wide failure state.
+- `app_settings` for runtime defaults.
+- `api_tokens` for encrypted external credentials and usage.
 
-A feature that needs new persistent domain data can add a table in `app/models.py`. Once the schema starts changing between deployed versions, add Alembic migrations; version 0.1 deliberately uses `Base.metadata.create_all()` to keep initial deployment small.
+## Optional preparation
+
+A feature may expose `prepare(task_id)` when it must initialize resources before the job should become `running`. The transcription feature uses this to load/switch Whisper models while the task is in `claimed` state.
+
+A resident feature may also expose `warmup()` for startup initialization.
 
 ## Queue choice
 
-Use `transcribe` for the resident Whisper worker. Use `network` for API-dependent text features. Add a new queue only when a feature has materially different resource requirements.
+- `transcribe`: CPU-heavy resident Whisper model.
+- `network`: Gemini and future network text processing.
+- Add another queue only for materially different resource requirements.
+
+## Timed text
+
+Do not let text-cleaning providers regenerate timestamps. Keep stable cue IDs and timestamps from the ASR stage and only replace cue text. `app/services/subtitles.py` provides SRT/VTT/JSON helpers.
 
 ## Artifacts
 
-Register output files through `register_text_artifact()` instead of adding download endpoints per feature. The existing artifact API will expose them automatically.
-
-Examples of future kinds:
+Use `register_text_artifact()` for text-based artifacts. Give each artifact kind a stable semantic name such as:
 
 ```text
-summarize       -> network
-rewrite_text    -> network
-export_docx     -> general
-export_pdf      -> general
+summary
+translation
+transcript_edited
+subtitle_translated_json
+subtitle_translated_vtt
 ```
 
 ## Settings
 
-Algorithm settings are snapshotted at the start of a stage. Network proxy settings remain live so a proxy can be changed while an API task is waiting or retrying.
+Global settings are defaults. Job-specific transcription/cleaning settings are snapshotted before their stages. Network routing remains live by design.
+
+## Database schema
+
+v2.1 still uses `Base.metadata.create_all()` and is intended as a fresh v2 deployment. Before making post-v2.1 schema changes on a database that must preserve production data, add proper Alembic migrations instead of relying on `create_all()`.

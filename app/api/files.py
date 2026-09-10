@@ -118,8 +118,8 @@ def delete_source_file(file_id: str, db: Session = Depends(get_db)):
     job = db.get(Job, file_id)
     if not job:
         raise HTTPException(404, "Audio file not found")
-    if any(task.status in ("claimed", "running", "queued", "retry_wait") for task in job.tasks):
-        raise HTTPException(409, "The source audio is still needed by an active job")
+    if job.status not in ("completed", "cancelled"):
+        raise HTTPException(409, "Source audio can only be deleted after the job is completed or cancelled")
     if job.source_deleted_at is not None:
         return {"deleted": file_id}
     path = Path(job.source_path)

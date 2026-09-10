@@ -1,18 +1,23 @@
 # Changelog
 
 ## v2.1.0
-Planned media/transcript release: timed Whisper cues, Gemini cue-preserving cleanup, SRT/VTT/JSON subtitle artifacts, and browser-player support.
+- Preserve Whisper timing as stable cue IDs.
+- Clean cue text with Gemini while enforcing unchanged cue IDs/order.
+- Generate raw/cleaned JSON, SRT and WebVTT subtitle artifacts.
+- Produce final TXT without cue IDs/timestamps while retaining cue line boundaries.
+- Add `/api/subtitles` endpoints for player-friendly timed text.
+- Add byte-range-capable source audio streaming for a future browser audio player.
+- Keep original formats/sample rates while FFmpeg normalizes only temporary inference windows.
 
 ## v2.0.0
-Backend control-plane release:
 - Source audio API with metadata, tags, descriptions, download, stream and guarded deletion.
-- Batch records and batch pause/resume/cancel/retry controls.
-- Per-job transcription and cleaning overrides snapshotted at upload.
+- Explicit batch records with batch pause/resume/cancel/retry controls.
+- Per-job transcription and cleaning overrides at upload and before stage start.
 - Job history/search/filter endpoint.
-- File validation through FFprobe and support for common FFmpeg-readable audio containers.
-- Unified persisted SSE events plus live system SSE snapshots.
-- Worker/model readiness state and pre-run task claiming.
-- CPU, RAM, disk, queue, worker and circuit-breaker status endpoint.
+- FFprobe file validation and broad FFmpeg-readable audio support.
+- Persisted typed SSE events plus live system SSE snapshots.
+- Worker/model readiness state and `claimed -> prepare -> running` task flow.
+- CPU, RAM, disk, queue, worker and circuit-breaker status endpoints.
 - Gemini provider circuit breaker and manual reset endpoint.
 - Host Hugging Face model-cache mounting and local-only model mode support.
 

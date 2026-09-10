@@ -1,3 +1,4 @@
+import json
 import re
 import shutil
 import uuid
@@ -53,7 +54,14 @@ def save_upload(job_id: str, upload: UploadFile) -> tuple[Path, int]:
     return destination, size
 
 
-def register_text_artifact(db: Session, job_id: str, kind: str, name: str, text: str) -> Artifact:
+def register_text_artifact(
+    db: Session,
+    job_id: str,
+    kind: str,
+    name: str,
+    text: str,
+    mime_type: str = "text/plain; charset=utf-8",
+) -> Artifact:
     path = artifact_dir(job_id) / name
     path.write_text(text, encoding="utf-8-sig")
 
@@ -61,6 +69,7 @@ def register_text_artifact(db: Session, job_id: str, kind: str, name: str, text:
     if artifact:
         artifact.name = name
         artifact.path = str(path)
+        artifact.mime_type = mime_type
     else:
         artifact = Artifact(
             id=str(uuid.uuid4()),
@@ -68,11 +77,22 @@ def register_text_artifact(db: Session, job_id: str, kind: str, name: str, text:
             kind=kind,
             name=name,
             path=str(path),
-            mime_type="text/plain; charset=utf-8",
+            mime_type=mime_type,
         )
         db.add(artifact)
     db.flush()
     return artifact
+
+
+def register_json_artifact(db: Session, job_id: str, kind: str, name: str, payload: dict) -> Artifact:
+    return register_text_artifact(
+        db,
+        job_id,
+        kind,
+        name,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        "application/json; charset=utf-8",
+    )
 
 
 def delete_job_files(job_id: str) -> None:

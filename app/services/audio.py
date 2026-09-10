@@ -1,3 +1,4 @@
+import mimetypes
 import json
 import subprocess
 from pathlib import Path
@@ -51,8 +52,6 @@ def probe_audio(path: Path) -> dict:
 
 
 def validate_audio(path: Path, size_bytes: int, max_bytes: int, max_duration_seconds: int) -> dict:
-    if path.suffix.lower() not in AUDIO_EXTENSIONS:
-        raise AudioValidationError(f"Unsupported audio extension: {path.suffix or 'none'}")
     if size_bytes <= 0:
         raise AudioValidationError("Audio file is empty")
     if size_bytes > max_bytes:
@@ -85,3 +84,10 @@ def extract_window(source: Path, destination: Path, start: float, duration: floa
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+def guess_audio_mime(path: Path, supplied: str | None = None) -> str:
+    if supplied and supplied != "application/octet-stream":
+        return supplied
+    guessed, _ = mimetypes.guess_type(path.name)
+    return guessed or "application/octet-stream"

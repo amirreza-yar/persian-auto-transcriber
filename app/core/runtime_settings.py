@@ -4,7 +4,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import AppSetting
+from app.models import AppSetting, CircuitBreaker
 
 
 DEFAULTS: dict[str, Any] = {
@@ -78,6 +78,8 @@ def bootstrap_settings(db: Session) -> None:
     for key, value in DEFAULTS.items():
         if db.get(AppSetting, key) is None:
             db.add(AppSetting(key=key, value=json.dumps(value, ensure_ascii=False)))
+    if db.get(CircuitBreaker, "gemini") is None:
+        db.add(CircuitBreaker(name="gemini"))
     db.commit()
 
 
@@ -118,6 +120,20 @@ def make_job_config(db: Session, section: str, overrides: dict[str, Any] | None 
     mapping = TRANSCRIPTION_KEYS if section == "transcription" else CLEANING_KEYS
     config = {name: values[key] for name, key in mapping.items()}
     for name, value in (overrides or {}).items():
+        if name not in mapping:
+            raise ValueError(f"Unknown {section} override: {name}")
+        global_key = mapping[name]
+        validator = VALIDATORS.get(global_key)
+        if validator and not validator(value):
+            raise ValueError(f"Invalid {section} override: {name}")
+        config[name] = value
+    return config
+
+
+def merge_job_config(db: Session, section: str, current: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    mapping = TRANSCRIPTION_KEYS if section == "transcription" else CLEANING_KEYS
+    config = dict(current)
+    for name, value in overrides.items():
         if name not in mapping:
             raise ValueError(f"Unknown {section} override: {name}")
         global_key = mapping[name]

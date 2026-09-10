@@ -46,3 +46,4 @@ services:
 
 volumes:
   app_data:
+    name: ${DATA_VOLUME_NAME:-persian-stt-v2-data}

@@ -118,7 +118,7 @@ def batch_to_out(batch: Batch, include_jobs: bool = True) -> BatchOut:
         queued_jobs=counts["queued"],
         created_at=batch.created_at,
         updated_at=batch.updated_at,
-        jobs=[job_to_out(job) for job in batch.jobs] if include_jobs else [],
+        jobs=[job_to_out(job) for job in sorted(batch.jobs, key=lambda item: item.queue_position)] if include_jobs else [],
     )
 
 
@@ -141,6 +141,8 @@ def event_to_out(event: Event) -> EventOut:
 
 def worker_to_out(db: Session, worker: WorkerState) -> WorkerStateOut:
     stale_after = int(get_setting(db, "worker.stale_after_seconds"))
+    if worker.status == "loading_model":
+        stale_after = max(stale_after, 1800)
     stale = worker.heartbeat_at < utcnow() - timedelta(seconds=stale_after)
     return WorkerStateOut(
         id=worker.id,

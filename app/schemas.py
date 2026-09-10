@@ -72,6 +72,11 @@ class ReorderRequest(BaseModel):
     job_ids: list[str] = Field(min_length=1)
 
 
+class JobSettingsPatch(BaseModel):
+    transcription: dict[str, Any] | None = None
+    cleaning: dict[str, Any] | None = None
+
+
 class JobHistoryPage(BaseModel):
     total: int
     offset: int

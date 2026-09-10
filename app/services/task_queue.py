@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.events import add_event
 from app.db import utcnow
-from app.models import Job, Task
+from app.models import Job, Task, WorkerState
 
 
 def enqueue_task(db: Session, job_id: str, kind: str, queue: str, next_run_at=None) -> Task:
@@ -79,7 +79,13 @@ def heartbeat(
     progress: float | None = None,
     job_progress: float | None = None,
 ) -> None:
-    task.heartbeat_at = utcnow()
+    now = utcnow()
+    task.heartbeat_at = now
+    worker = db.get(WorkerState, task.queue)
+    if worker:
+        worker.heartbeat_at = now
+        worker.status = "busy"
+        worker.current_job_id = task.job_id
     if progress is not None:
         task.progress = max(0.0, min(1.0, progress))
     if job_progress is not None:

@@ -67,6 +67,48 @@ def status(db: Session = Depends(get_db)):
     return system_snapshot(db)
 
 
+
+
+@router.get("/system/workers")
+def workers(db: Session = Depends(get_db)):
+    rows = db.scalars(select(WorkerState).order_by(WorkerState.queue)).all()
+    return [worker_to_out(db, row).model_dump(mode="json") for row in rows]
+
+
+@router.get("/system/model")
+def model_status(db: Session = Depends(get_db)):
+    worker = db.get(WorkerState, "transcribe")
+    if not worker:
+        return {"status": "offline", "model_name": None, "current_job_id": None}
+    out = worker_to_out(db, worker)
+    return {
+        "status": out.status,
+        "model_name": out.model_name,
+        "current_job_id": out.current_job_id,
+        "detail": out.detail,
+        "heartbeat_at": out.heartbeat_at,
+        "stale": out.stale,
+    }
+
+
+@router.get("/system/circuits")
+def circuits(db: Session = Depends(get_db)):
+    rows = db.scalars(select(CircuitBreaker).order_by(CircuitBreaker.name)).all()
+    return [
+        {
+            "name": row.name,
+            "state": row.state,
+            "consecutive_failures": row.consecutive_failures,
+            "opened_until": row.opened_until,
+            "last_error": row.last_error,
+            "last_failure_at": row.last_failure_at,
+            "last_success_at": row.last_success_at,
+            "updated_at": row.updated_at,
+        }
+        for row in rows
+    ]
+
+
 @router.get("/system/stream", response_class=EventSourceResponse)
 async def stream_system():
     async def generate():
