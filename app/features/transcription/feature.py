@@ -16,6 +16,7 @@ from app.models import Job, Task
 from app.services.audio import extract_window
 from app.services.network import apply_proxy_environment
 from app.services.storage import register_text_artifact, work_dir
+from app.services.reading_text import cues_to_reading_text
 from app.services.subtitles import cues_to_srt, cues_to_vtt, dump_cues
 from app.services.task_queue import enqueue_task, heartbeat
 from app.workers.exceptions import JobCancelled, JobPaused
@@ -223,7 +224,7 @@ class TranscriptionFeature:
                     data={"stage": "clean", "status": "queued", "progress": 0.85, "cues": len(normalized_cues)},
                 )
             else:
-                register_text_artifact(db, job.id, "final_text", f"{stem}.txt", normalized_text)
+                register_text_artifact(db, job.id, "final_text", f"{stem}.txt", cues_to_reading_text(normalized_cues))
                 self._register_subtitle_artifacts(db, job, stem, normalized_cues, "cleaned")
                 job.stage = "done"
                 job.status = "completed"

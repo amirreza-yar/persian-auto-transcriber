@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.2.0
+- Final TXT is now prose-oriented instead of one subtitle cue per line.
+- Gemini returns a structured `paragraph_after` annotation while preserving cue IDs and timestamps.
+- If paragraph metadata is unavailable, final TXT falls back to one continuous text rather than artificial line breaks.
+- Retry-wait is now a distinct non-running job state; recoverable cleaner failures stay in `Task.last_error` instead of polluting terminal `Job.error`.
+- Starting a retry clears stale recoverable job errors.
+- Add optional Vite `frontend/dist` serving and SPA fallback on the same FastAPI port, without requiring Node in production.
+- Add repeatable unit/read-only smoke test pipeline and an optional live audio end-to-end test script.
+
+
 ## v2.1.0
 - Preserve Whisper timing as stable cue IDs.
 - Clean cue text with Gemini while enforcing unchanged cue IDs/order.

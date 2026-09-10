@@ -62,3 +62,11 @@ Global settings are defaults. Job-specific transcription/cleaning settings are s
 ## Database schema
 
 v2.1 still uses `Base.metadata.create_all()` and is intended as a fresh v2 deployment. Before making post-v2.1 schema changes on a database that must preserve production data, add proper Alembic migrations instead of relying on `create_all()`.
+
+## Reading layout vs subtitle timing
+
+Do not encode readable paragraph layout by changing subtitle timestamps or merging cue IDs. `clean_text` may attach display metadata such as `paragraph_after`, while audio synchronization continues to use the original Whisper cue IDs/start/end values. Plain-text exporters should use `app.services.reading_text.cues_to_reading_text()` rather than joining cues with newline characters.
+
+## Frontend deployment
+
+The backend is intentionally frontend-optional. A production Vite build may be copied to `frontend/dist`. `app.frontend.install_frontend()` mounts Vite assets and adds SPA fallback only when `index.html` exists. Keep all backend endpoints under `/api` so React Router cannot shadow them.

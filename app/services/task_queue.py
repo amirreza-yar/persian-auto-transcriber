@@ -59,9 +59,11 @@ def claim_task(db: Session, queue: str) -> Task | None:
 def start_task(db: Session, task: Task) -> None:
     now = utcnow()
     task.status = "running"
+    task.last_error = None
     task.started_at = task.started_at or now
     task.heartbeat_at = now
     task.job.status = "running"
+    task.job.error = None
     task.job.started_at = task.job.started_at or now
     add_event(
         db,
@@ -111,8 +113,8 @@ def retry_task(db: Session, task: Task, error: str, delay_seconds: int) -> None:
     task.last_error = error[:4000]
     task.next_run_at = utcnow() + timedelta(seconds=delay_seconds)
     task.heartbeat_at = None
-    task.job.status = "queued"
-    task.job.error = error[:4000]
+    task.job.status = "retry_wait"
+    task.job.error = None
     add_event(
         db,
         "Task retry scheduled",

@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:////data/app.db"
     data_dir: Path = Path("/data")
     model_dir: Path = Path("/models")
+    frontend_dir: Path = Path("/app/frontend/dist")
     whisper_local_files_only: bool = False
     bootstrap_socks5_proxy: str = ""
     log_level: str = "INFO"

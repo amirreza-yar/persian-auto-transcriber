@@ -1,6 +1,6 @@
 [project]
 name = "persian-stt-backend"
-version = "2.1.0"
+version = "2.2.0"
 description = "Local Persian speech-to-text job service"
 requires-python = ">=3.13,<3.14"
 dependencies = [

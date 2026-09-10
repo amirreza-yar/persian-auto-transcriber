@@ -14,11 +14,15 @@ from app.features.cleaning.prompt import CUE_SYSTEM_PROMPT
 from app.models import Artifact, Job, Task
 from app.services.circuit_breaker import allow_request, get_circuit, record_circuit_failure, record_circuit_success
 from app.services.network import validate_proxy
+from app.services.reading_text import cues_to_reading_text
 from app.services.storage import register_text_artifact, work_dir
 from app.services.subtitles import cues_to_srt, cues_to_vtt, dump_cues, load_cues, split_cues
 from app.services.task_queue import heartbeat
 from app.services.token_manager import acquire_token, record_failure, record_success
 from app.workers.exceptions import JobCancelled, JobPaused, RetryLater
+
+
+CLEANING_CHECKPOINT_VERSION = "paragraphs-v1"
 
 
 class CleaningFeature:
@@ -57,7 +61,7 @@ class CleaningFeature:
 
     def _register_cleaned(self, db: Session, job: Job, cues: list[dict]) -> None:
         stem = Path(job.original_name).stem
-        final_text = "\n".join(cue["text"].strip() for cue in cues if cue["text"].strip())
+        final_text = cues_to_reading_text(cues)
         register_text_artifact(db, job.id, "final_text", f"{stem}.txt", final_text)
         register_text_artifact(
             db,
@@ -119,7 +123,11 @@ class CleaningFeature:
                 if job.is_paused:
                     raise JobPaused()
 
-                digest_source = json.dumps(chunk, ensure_ascii=False, sort_keys=True)
+                digest_source = json.dumps(
+                    {"version": CLEANING_CHECKPOINT_VERSION, "chunk": chunk},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
                 digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:12]
                 checkpoint = checkpoint_dir / f"{index:06d}_{digest}.json"
                 if checkpoint.exists():
@@ -182,7 +190,14 @@ class CleaningFeature:
                     text = str(item.get("text", "")).strip()
                     if not text:
                         raise RuntimeError(f"Gemini returned empty text for {original['id']}")
-                    cleaned.append({**original, "text": text})
+                    paragraph_after = item.get("paragraph_after", False)
+                    if not isinstance(paragraph_after, bool):
+                        raise RuntimeError(
+                            f"Gemini returned invalid paragraph_after for {original['id']}"
+                        )
+                    cleaned.append(
+                        {**original, "text": text, "paragraph_after": paragraph_after}
+                    )
 
                 usage = response.usage_metadata
                 prompt_tokens = int(getattr(usage, "prompt_token_count", 0) or 0) if usage else 0

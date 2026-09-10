@@ -1,4 +1,4 @@
-# Persian STT Backend v2.1
+# Persian STT Backend v2.2
 
 Local-LAN Persian speech-to-text backend with a persistent job queue, Faster-Whisper transcription, optional Gemini cleanup, timed subtitles and APIs intended for a future React SPA.
 
@@ -7,6 +7,7 @@ Local-LAN Persian speech-to-text backend with a persistent job queue, Faster-Whi
 - `v1.0.0` - original backend baseline.
 - `v2.0.0` - files, batches, job overrides/history, SSE, worker/model readiness, system resources, validation and Gemini circuit breaker.
 - `v2.1.0` - timed Whisper cues, cue-preserving Gemini cleanup, SRT/VTT/JSON subtitles and browser audio streaming support.
+- `v2.2.0` - readable paragraph-aware final TXT, clearer retry-wait semantics, production Vite SPA serving hook and backend test pipeline.
 
 The source bundle includes these tags in the accompanying Git bundle.
 
@@ -377,4 +378,65 @@ Both transcription and cleaning checkpoints survive worker restarts.
 
 ## LAN-only scope
 
-There is intentionally no authentication layer in v2.1. Bind/expose port 8000 only on a trusted LAN. Add authentication before exposing these token-management and file endpoints to the public internet.
+There is intentionally no authentication layer in v2.2. Bind/expose port 8000 only on a trusted LAN. Add authentication before exposing these token-management and file endpoints to the public internet.
+
+
+## Final text and paragraphing
+
+Subtitle timing and reading layout are intentionally separate. Whisper cue IDs and timestamps remain stable for SRT/VTT/player synchronization. During Gemini cleanup, each cue may also receive a boolean `paragraph_after` annotation. Gemini cannot change the cue ID or timing.
+
+The final TXT joins adjacent cue text with spaces and inserts a blank line only after cues explicitly marked as paragraph boundaries. If cleaning is disabled or paragraph metadata is missing, the final TXT becomes one continuous readable text instead of one subtitle cue per line. Raw and normalized TXT artifacts remain cue-oriented because they are useful for inspection/debugging.
+
+## Retry-wait semantics
+
+Recoverable cleaner problems such as unavailable Gemini credentials or an open provider circuit are not terminal job errors. A delayed task is exposed as:
+
+```text
+job.status = retry_wait
+task.status = retry_wait
+task.last_error = <latest recoverable reason>
+job.error = null
+```
+
+When the task starts again, the job changes to `running`. `job.error` is reserved for terminal failures. The frontend should use the active task's `last_error` and `next_run_at` when presenting a waiting/retrying state.
+
+## Production frontend hook
+
+No frontend source is included yet. When a Vite application is added later, build it on the development machine:
+
+```bash
+npm run build
+```
+
+Place the resulting Vite output at:
+
+```text
+frontend/dist/
+```
+
+The backend detects `frontend/dist/index.html` at startup. When present, it serves the SPA and its `/assets` on the same FastAPI port as `/api`. Unknown non-API paths fall back to `index.html` for React Router. When the directory is absent, the backend remains API-only. No Node/Vite development server is required on the EliteDesk in production.
+
+## Test pipeline
+
+Run deterministic syntax/unit tests locally:
+
+```bash
+./scripts/test_pipeline.sh
+```
+
+To include read-only checks against a running backend:
+
+```bash
+API_BASE_URL=http://192.168.0.150:8000 ./scripts/test_pipeline.sh
+```
+
+This checks health, system, workers, circuits, jobs and files without creating or deleting data.
+
+For an optional real end-to-end audio test:
+
+```bash
+uv run --group dev python scripts/live_job_test.py /path/to/test.mp3 \
+  --base-url http://192.168.0.150:8000
+```
+
+It uploads one file, follows transcription/cleaning state, and verifies the expected TXT/JSON/SRT/VTT artifacts after completion. Add `--no-cleaning` to test Whisper without Gemini. This is intentionally separate from the fast test pipeline because it can consume substantial CPU time and API usage.
