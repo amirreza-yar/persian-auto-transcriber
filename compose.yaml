@@ -1,0 +1,40 @@
+x-app: &app
+  build: .
+  image: persian-stt-backend:local
+  env_file: .env
+  volumes:
+    - app_data:/data
+    - model_cache:/models
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  restart: unless-stopped
+
+services:
+  api:
+    <<: *app
+    command: ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  transcriber:
+    <<: *app
+    command: ["uv", "run", "python", "-m", "app.workers.runner", "--queue", "transcribe"]
+    depends_on:
+      api:
+        condition: service_healthy
+
+  network-worker:
+    <<: *app
+    command: ["uv", "run", "python", "-m", "app.workers.runner", "--queue", "network"]
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  app_data:
+  model_cache:

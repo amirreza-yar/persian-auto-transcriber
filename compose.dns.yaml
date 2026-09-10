@@ -1,0 +1,7 @@
+services:
+  api:
+    dns: ["${DNS_SERVER}"]
+  transcriber:
+    dns: ["${DNS_SERVER}"]
+  network-worker:
+    dns: ["${DNS_SERVER}"]

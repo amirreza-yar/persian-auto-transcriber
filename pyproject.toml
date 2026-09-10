@@ -1,0 +1,27 @@
+[project]
+name = "persian-stt-backend"
+version = "0.1.0"
+description = "Local Persian speech-to-text job service"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "cryptography>=45,<47",
+    "fastapi>=0.141,<0.142",
+    "faster-whisper>=1.2,<2",
+    "google-genai>=1.40,<2",
+    "hazm>=0.10,<1",
+    "httpx[socks]>=0.28,<1",
+    "pydantic-settings>=2.10,<3",
+    "python-multipart>=0.0.20,<1",
+    "sqlalchemy>=2.0.52,<2.1",
+    "uvicorn[standard]>=0.35,<1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4,<9",
+    "httpx>=0.28,<1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
