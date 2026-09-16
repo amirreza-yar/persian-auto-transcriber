@@ -9,6 +9,7 @@ def install_frontend(app: FastAPI, frontend_dir: Path) -> None:
     frontend_dir = frontend_dir.resolve()
     index_file = frontend_dir / "index.html"
 
+    print("Found index.html in frontend/dist")
     if not index_file.is_file():
         return
 

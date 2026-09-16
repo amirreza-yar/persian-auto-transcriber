@@ -5,3 +5,13 @@ __pycache__/
 /data/
 /models/
 .pytest_cache/
+
+uv.lock
+
+node_modules/
+dist/
+.vite/
+.env.local
+*.log
+.DS_Store
+pnpm.lock

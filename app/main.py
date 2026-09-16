@@ -37,5 +37,5 @@ app.include_router(settings_api.router, prefix="/api")
 app.include_router(tokens.router, prefix="/api")
 app.include_router(events.router, prefix="/api")
 
-
+print("installing frontend")
 install_frontend(app, settings.frontend_dir)

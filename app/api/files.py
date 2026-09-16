@@ -8,11 +8,10 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
 from app.core.events import add_event
-from app.db import utcnow
+from app.db import SessionLocal, utcnow
 from app.models import Job
 from app.schemas import AudioFileOut, AudioFilePatch
 from app.services.presenters import audio_to_out
-
 
 router = APIRouter(prefix="/files", tags=["files"])
 
@@ -44,7 +43,9 @@ def list_files(
         stmt = stmt.where(Job.source_deleted_at.is_(None))
     if q:
         like = f"%{q}%"
-        stmt = stmt.where(or_(Job.original_name.ilike(like), Job.description.ilike(like)))
+        stmt = stmt.where(
+            or_(Job.original_name.ilike(like), Job.description.ilike(like))
+        )
     if tag:
         stmt = stmt.where(Job.tags_json.like(f'%"{tag}"%'))
     if status:
@@ -83,34 +84,45 @@ def update_file(file_id: str, body: AudioFilePatch, db: Session = Depends(get_db
     return audio_to_out(job)
 
 
-def _file_response(job: Job, inline: bool):
-    if job.source_deleted_at is not None or not job.source_path:
-        raise HTTPException(404, "Audio file has been deleted")
-    path = Path(job.source_path)
+def _source_file_info(file_id: str) -> tuple[Path, str, str]:
+    # FileResponse may stay alive while the browser performs range requests.
+    # Resolve the DB-backed metadata first, then release the connection before
+    # any response body is streamed.
+    with SessionLocal() as db:
+        job = db.get(Job, file_id)
+        if not job:
+            raise HTTPException(404, "Audio file not found")
+        if job.source_deleted_at is not None or not job.source_path:
+            raise HTTPException(404, "Audio file has been deleted")
+
+        path = Path(job.source_path)
+        original_name = job.original_name
+        mime_type = job.source_mime_type or "application/octet-stream"
+
     if not path.exists():
         raise HTTPException(404, "Audio file is missing from storage")
+
+    return path, original_name, mime_type
+
+
+def _file_response(file_id: str, inline: bool):
+    path, original_name, mime_type = _source_file_info(file_id)
     return FileResponse(
         path,
-        filename=job.original_name,
-        media_type=job.source_mime_type or "application/octet-stream",
+        filename=original_name,
+        media_type=mime_type,
         content_disposition_type="inline" if inline else "attachment",
     )
 
 
 @router.get("/{file_id}/stream")
-def stream_file(file_id: str, db: Session = Depends(get_db)):
-    job = db.get(Job, file_id)
-    if not job:
-        raise HTTPException(404, "Audio file not found")
-    return _file_response(job, inline=True)
+def stream_file(file_id: str):
+    return _file_response(file_id, inline=True)
 
 
 @router.get("/{file_id}/download")
-def download_file(file_id: str, db: Session = Depends(get_db)):
-    job = db.get(Job, file_id)
-    if not job:
-        raise HTTPException(404, "Audio file not found")
-    return _file_response(job, inline=False)
+def download_file(file_id: str):
+    return _file_response(file_id, inline=False)
 
 
 @router.delete("/{file_id}")
@@ -119,7 +131,10 @@ def delete_source_file(file_id: str, db: Session = Depends(get_db)):
     if not job:
         raise HTTPException(404, "Audio file not found")
     if job.status not in ("completed", "cancelled"):
-        raise HTTPException(409, "Source audio can only be deleted after the job is completed or cancelled")
+        raise HTTPException(
+            409,
+            "Source audio can only be deleted after the job is completed or cancelled",
+        )
     if job.source_deleted_at is not None:
         return {"deleted": file_id}
     path = Path(job.source_path)

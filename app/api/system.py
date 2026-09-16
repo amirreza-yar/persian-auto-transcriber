@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import psutil
@@ -15,7 +16,6 @@ from app.models import CircuitBreaker, Job, WorkerState
 from app.services.circuit_breaker import reset_circuit
 from app.services.presenters import worker_to_out
 
-
 router = APIRouter(tags=["system"])
 
 
@@ -28,7 +28,9 @@ def health(db: Session = Depends(get_db)):
 def system_snapshot(db: Session) -> dict:
     memory = psutil.virtual_memory()
     disk = psutil.disk_usage("/data" if Path("/data").exists() else "/")
-    workers = db.scalars(select(WorkerState).order_by(WorkerState.started_at.desc())).all()
+    workers = db.scalars(
+        select(WorkerState).order_by(WorkerState.started_at.desc())
+    ).all()
     circuits = db.scalars(select(CircuitBreaker).order_by(CircuitBreaker.name)).all()
     queue_counts = dict(
         db.execute(select(Job.status, func.count(Job.id)).group_by(Job.status)).all()
@@ -45,16 +47,28 @@ def system_snapshot(db: Session) -> dict:
             "disk_free": disk.free,
             "disk_percent": disk.percent,
         },
-        "workers": [worker_to_out(db, worker).model_dump(mode="json") for worker in workers],
+        "workers": [
+            worker_to_out(db, worker).model_dump(mode="json") for worker in workers
+        ],
         "circuits": [
             {
                 "name": circuit.name,
                 "state": circuit.state,
                 "consecutive_failures": circuit.consecutive_failures,
-                "opened_until": circuit.opened_until.isoformat() if circuit.opened_until else None,
+                "opened_until": (
+                    circuit.opened_until.isoformat() if circuit.opened_until else None
+                ),
                 "last_error": circuit.last_error,
-                "last_failure_at": circuit.last_failure_at.isoformat() if circuit.last_failure_at else None,
-                "last_success_at": circuit.last_success_at.isoformat() if circuit.last_success_at else None,
+                "last_failure_at": (
+                    circuit.last_failure_at.isoformat()
+                    if circuit.last_failure_at
+                    else None
+                ),
+                "last_success_at": (
+                    circuit.last_success_at.isoformat()
+                    if circuit.last_success_at
+                    else None
+                ),
             }
             for circuit in circuits
         ],
@@ -65,8 +79,6 @@ def system_snapshot(db: Session) -> dict:
 @router.get("/system/status")
 def status(db: Session = Depends(get_db)):
     return system_snapshot(db)
-
-
 
 
 @router.get("/system/workers")
@@ -110,19 +122,29 @@ def circuits(db: Session = Depends(get_db)):
 
 
 @router.get("/system/stream", response_class=EventSourceResponse)
-async def stream_system():
-    async def generate():
-        while True:
-            with SessionLocal() as db:
-                interval = float(get_setting(db, "system.stream_interval_seconds"))
-                yield ServerSentEvent(event="system.snapshot", data=system_snapshot(db))
-            await asyncio.sleep(interval)
-    return EventSourceResponse(generate())
+async def stream_system() -> AsyncIterator[ServerSentEvent]:
+    while True:
+        with SessionLocal() as db:
+            interval = float(get_setting(db, "system.stream_interval_seconds"))
+            snapshot = system_snapshot(db)
+
+        # Do not keep a SQLAlchemy session checked out while SSE sends data.
+        yield ServerSentEvent(
+            event="system.snapshot",
+            data=snapshot,
+        )
+
+        await asyncio.sleep(interval)
 
 
 @router.post("/system/circuits/{name}/reset")
 def reset_provider_circuit(name: str, db: Session = Depends(get_db)):
     circuit = reset_circuit(db, name)
-    add_event(db, f"Circuit {name} manually reset", event_type="circuit.status", data={"name": name, "state": circuit.state})
+    add_event(
+        db,
+        f"Circuit {name} manually reset",
+        event_type="circuit.status",
+        data={"name": name, "state": circuit.state},
+    )
     db.commit()
     return {"name": circuit.name, "state": circuit.state}

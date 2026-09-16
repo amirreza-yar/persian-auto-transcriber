@@ -37,6 +37,8 @@ services:
       api:
         condition: service_healthy
 
+    cpus: 2.5
+
   network-worker:
     <<: *app
     command: ["uv", "run", "python", "-m", "app.workers.runner", "--queue", "network"]
