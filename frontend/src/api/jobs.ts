@@ -86,6 +86,11 @@ export async function retryJob(jobId: string) {
   return data
 }
 
+export async function recleanJob(jobId: string) {
+  const { data } = await api.post<Job>(`/jobs/${jobId}/reclean`)
+  return data
+}
+
 export async function deleteJob(jobId: string) {
   const { data } = await api.delete<{ deleted: string }>(`/jobs/${jobId}`)
   return data

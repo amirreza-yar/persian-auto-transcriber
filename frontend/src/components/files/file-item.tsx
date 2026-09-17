@@ -1,9 +1,10 @@
 import * as React from "react"
-import { DownloadIcon, FileAudioIcon, MoreHorizontalIcon, PencilIcon, PlayIcon, TextIcon, Trash2Icon } from "lucide-react"
+import { DownloadIcon, FileAudioIcon, MoreHorizontalIcon, PencilIcon, PlayIcon, RefreshCcwIcon, TextIcon, Trash2Icon } from "lucide-react"
 import { Link } from "react-router-dom"
 import { toast } from "sonner"
 
 import { artifactDownloadUrl } from "@/api/artifacts"
+import { recleanJob } from "@/api/jobs"
 import { normalizeApiError } from "@/api/client"
 import { audioDownloadUrl, deleteSourceAudio } from "@/api/files"
 import { useAppData } from "@/app/app-data-provider"
@@ -37,6 +38,7 @@ export function FileItem({
   const { refreshJobs } = useAppData()
   const [metadataOpen, setMetadataOpen] = React.useState(false)
   const [deleteOpen, setDeleteOpen] = React.useState(false)
+  const [recleanOpen, setRecleanOpen] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
   const [offlineBusy, setOfflineBusy] = React.useState(false)
   const textArtifact = job ? preferredTextArtifact(job) : null
@@ -76,6 +78,26 @@ export function FileItem({
   }
 
   const canSaveOffline = file.source_available && job?.status === "completed"
+  const hasNormalizedTranscript = job?.artifacts.some((artifact) => artifact.kind === "subtitle_normalized_json") ?? false
+  const cleaningBusy = job?.tasks.some(
+    (task) => task.kind === "clean_text" && ["queued", "retry_wait", "claimed", "running"].includes(task.status),
+  ) ?? false
+  const canReclean = Boolean(job && hasNormalizedTranscript && !cleaningBusy)
+
+  const reclean = async () => {
+    if (!job) return
+    setBusy(true)
+    try {
+      await recleanJob(job.id)
+      await refreshJobs()
+      setRecleanOpen(false)
+      toast.success("Cleanup queued again.")
+    } catch (error) {
+      toast.error(normalizeApiError(error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
     <>
@@ -95,6 +117,7 @@ export function FileItem({
                 <DropdownMenuContent align="end">
                   <DropdownMenuItem onSelect={() => setMetadataOpen(true)}><PencilIcon />Edit details</DropdownMenuItem>
                   {canSaveOffline ? <DropdownMenuItem disabled={offlineBusy} onSelect={() => void toggleOffline()}><DownloadIcon />{offlineSaved ? "Remove offline copy" : "Save for offline"}</DropdownMenuItem> : null}
+                  {canReclean ? <DropdownMenuItem disabled={busy} onSelect={() => setRecleanOpen(true)}><RefreshCcwIcon />Re-clean transcript</DropdownMenuItem> : null}
                   {file.source_available ? <DropdownMenuItem asChild><a href={audioDownloadUrl(file.id)}><DownloadIcon />Download audio</a></DropdownMenuItem> : null}
                   {file.source_available && ["completed", "cancelled"].includes(file.job_status) ? <><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onSelect={() => setDeleteOpen(true)}><Trash2Icon />Delete source audio</DropdownMenuItem></> : null}
                 </DropdownMenuContent>
@@ -119,6 +142,7 @@ export function FileItem({
       </div>
 
       <FileMetadataDialog file={file} open={metadataOpen} onOpenChange={setMetadataOpen} onUpdated={onFileUpdated} />
+      <ConfirmDialog open={recleanOpen} onOpenChange={setRecleanOpen} title="Run cleanup again?" description="Cleanup will run again from the normalized transcript. Audio will not be retranscribed, and the current cleaned files stay available until the new cleanup succeeds." confirmLabel="Re-clean transcript" busy={busy} onConfirm={reclean} />
       <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete the source audio?" description="The original recording will be removed from the server. Existing transcript and subtitle files will stay available." confirmLabel="Delete audio" destructive busy={busy} onConfirm={deleteAudio} />
     </>
   )

@@ -3,7 +3,7 @@ import { DownloadIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, RefreshCcwIcon, 
 import { Link } from "react-router-dom"
 import { toast } from "sonner"
 
-import { cancelJob, pauseJob, resumeJob, retryJob } from "@/api/jobs"
+import { cancelJob, pauseJob, recleanJob, resumeJob, retryJob } from "@/api/jobs"
 import { artifactDownloadUrl } from "@/api/artifacts"
 import { useAppData } from "@/app/app-data-provider"
 import { ConfirmDialog } from "@/components/common/confirm-dialog"
@@ -17,6 +17,7 @@ export function JobActions({ job, compact = false }: { job: Job; compact?: boole
   const { setJob } = useAppData()
   const [busy, setBusy] = React.useState(false)
   const [confirmCancel, setConfirmCancel] = React.useState(false)
+  const [confirmReclean, setConfirmReclean] = React.useState(false)
   const textArtifact = preferredTextArtifact(job)
   const finalArtifact = finalTextArtifact(job)
 
@@ -37,6 +38,11 @@ export function JobActions({ job, compact = false }: { job: Job; compact?: boole
   const canResume = job.is_paused && !["completed", "cancelled"].includes(job.status)
   const canCancel = !["completed", "cancelled"].includes(job.status)
   const canRetry = ["failed", "cancelled"].includes(job.status)
+  const hasNormalizedTranscript = job.artifacts.some((artifact) => artifact.kind === "subtitle_normalized_json")
+  const cleaningBusy = job.tasks.some(
+    (task) => task.kind === "clean_text" && ["queued", "retry_wait", "claimed", "running"].includes(task.status),
+  )
+  const canReclean = hasNormalizedTranscript && !cleaningBusy
 
   return (
     <>
@@ -69,10 +75,24 @@ export function JobActions({ job, compact = false }: { job: Job; compact?: boole
             {canPause ? <DropdownMenuItem onSelect={() => void run(() => pauseJob(job.id))}><PauseIcon />Pause</DropdownMenuItem> : null}
             {canResume ? <DropdownMenuItem onSelect={() => void run(() => resumeJob(job.id))}><RotateCcwIcon />Resume</DropdownMenuItem> : null}
             {canRetry ? <DropdownMenuItem onSelect={() => void run(() => retryJob(job.id), "Job queued again.")}><RefreshCcwIcon />Retry</DropdownMenuItem> : null}
+            {canReclean ? <DropdownMenuItem onSelect={() => setConfirmReclean(true)}><RefreshCcwIcon />Re-clean transcript</DropdownMenuItem> : null}
             {canCancel ? <><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onSelect={() => setConfirmCancel(true)}><SquareIcon />Cancel</DropdownMenuItem></> : null}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
+
+      <ConfirmDialog
+        open={confirmReclean}
+        onOpenChange={setConfirmReclean}
+        title="Run cleanup again?"
+        description="Cleanup will run again from the normalized transcript. Audio will not be retranscribed, and the current cleaned files stay available until the new cleanup succeeds."
+        confirmLabel="Re-clean transcript"
+        busy={busy}
+        onConfirm={async () => {
+          await run(() => recleanJob(job.id), "Cleanup queued again.")
+          setConfirmReclean(false)
+        }}
+      />
 
       <ConfirmDialog
         open={confirmCancel}

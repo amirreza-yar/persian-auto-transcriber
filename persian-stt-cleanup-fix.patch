@@ -1,0 +1,544 @@
+Binary files project_archieve_extracted/project_archieve/app/__pycache__/__init__.cpython-313.pyc and project_archieve_patch/app/__pycache__/__init__.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/__pycache__/config.cpython-313.pyc and project_archieve_patch/app/__pycache__/config.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/__pycache__/db.cpython-313.pyc and project_archieve_patch/app/__pycache__/db.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/__pycache__/frontend.cpython-313.pyc and project_archieve_patch/app/__pycache__/frontend.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/__pycache__/main.cpython-313.pyc and project_archieve_patch/app/__pycache__/main.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/__pycache__/models.cpython-313.pyc and project_archieve_patch/app/__pycache__/models.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/__pycache__/schemas.cpython-313.pyc and project_archieve_patch/app/__pycache__/schemas.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/api/__pycache__/__init__.cpython-313.pyc and project_archieve_patch/app/api/__pycache__/__init__.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/api/__pycache__/artifacts.cpython-313.pyc and project_archieve_patch/app/api/__pycache__/artifacts.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/api/__pycache__/batches.cpython-313.pyc and project_archieve_patch/app/api/__pycache__/batches.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/api/__pycache__/deps.cpython-313.pyc and project_archieve_patch/app/api/__pycache__/deps.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/api/__pycache__/events.cpython-313.pyc and project_archieve_patch/app/api/__pycache__/events.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/api/__pycache__/files.cpython-313.pyc and project_archieve_patch/app/api/__pycache__/files.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/api/__pycache__/jobs.cpython-313.pyc and project_archieve_patch/app/api/__pycache__/jobs.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/api/__pycache__/settings.cpython-313.pyc and project_archieve_patch/app/api/__pycache__/settings.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/api/__pycache__/subtitles.cpython-313.pyc and project_archieve_patch/app/api/__pycache__/subtitles.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/api/__pycache__/system.cpython-313.pyc and project_archieve_patch/app/api/__pycache__/system.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/api/__pycache__/tokens.cpython-313.pyc and project_archieve_patch/app/api/__pycache__/tokens.cpython-313.pyc differ
+diff -ruN project_archieve_extracted/project_archieve/app/api/jobs.py project_archieve_patch/app/api/jobs.py
+--- project_archieve_extracted/project_archieve/app/api/jobs.py	2026-09-16 13:45:38.000000000 +0000
++++ project_archieve_patch/app/api/jobs.py	2026-09-16 10:25:29.326939528 +0000
+@@ -1,6 +1,8 @@
+ import json
++import shutil
+ import uuid
+ from datetime import UTC, datetime
++from pathlib import Path
+ 
+ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+ from sqlalchemy import case, func, or_, select
+@@ -14,7 +16,7 @@
+ from app.schemas import JobHistoryPage, JobOut, JobPatch, JobSettingsPatch, ReorderRequest
+ from app.services.audio import AudioValidationError, guess_audio_mime, validate_audio
+ from app.services.presenters import job_to_out
+-from app.services.storage import delete_job_files, save_upload
++from app.services.storage import delete_job_files, save_upload, work_dir
+ from app.services.task_queue import enqueue_task
+ 
+ 
+@@ -357,6 +359,59 @@
+     job = db.scalar(_job_stmt().where(Job.id == job_id))
+     return job_to_out(job)
+ 
++
++@router.post("/{job_id}/reclean", response_model=JobOut)
++def reclean_job(job_id: str, db: Session = Depends(get_db)):
++    job = db.scalar(_job_stmt().where(Job.id == job_id))
++    if not job:
++        raise HTTPException(404, "Job not found")
++
++    normalized = next(
++        (artifact for artifact in job.artifacts if artifact.kind == "subtitle_normalized_json"),
++        None,
++    )
++    if not normalized or not Path(normalized.path).exists():
++        raise HTTPException(409, "Normalized transcript is not available yet")
++
++    cleaning_config = json.loads(job.cleaning_config) if job.cleaning_config else make_job_config(db, "cleaning")
++    if not cleaning_config.get("enabled", True):
++        raise HTTPException(409, "Cleaning is disabled for this job")
++
++    active = [
++        task
++        for task in job.tasks
++        if task.kind == "clean_text"
++        and task.status in ("queued", "retry_wait", "claimed", "running")
++    ]
++    if active:
++        raise HTTPException(409, "Cleaning is already queued or running for this job")
++
++    # Explicit re-clean means old checkpoints must never be reused. Existing
++    # final/cleaned artifacts are intentionally kept until the new run finishes.
++    shutil.rmtree(work_dir(job.id, "cleaning") / "cues", ignore_errors=True)
++
++    now = utcnow()
++    enqueue_task(db, job.id, "clean_text", "network", now)
++
++    job.cancel_requested = False
++    job.is_paused = False
++    job.error = None
++    job.status = "queued"
++    job.stage = "clean"
++    job.progress = 0.85
++    job.completed_at = None
++    add_event(
++        db,
++        "Cleanup queued again from normalized transcript",
++        job.id,
++        event_type="job.reclean",
++        data={"status": "queued", "stage": "clean", "progress": 0.85},
++    )
++    db.commit()
++
++    job = db.scalar(_job_stmt().where(Job.id == job_id))
++    return job_to_out(job)
++
+ 
+ @router.post("/{job_id}/retry", response_model=JobOut)
+ def retry_job(job_id: str, db: Session = Depends(get_db)):
+Binary files project_archieve_extracted/project_archieve/app/core/__pycache__/__init__.cpython-313.pyc and project_archieve_patch/app/core/__pycache__/__init__.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/core/__pycache__/events.cpython-313.pyc and project_archieve_patch/app/core/__pycache__/events.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/core/__pycache__/runtime_settings.cpython-313.pyc and project_archieve_patch/app/core/__pycache__/runtime_settings.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/core/__pycache__/security.cpython-313.pyc and project_archieve_patch/app/core/__pycache__/security.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/features/__pycache__/__init__.cpython-313.pyc and project_archieve_patch/app/features/__pycache__/__init__.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/features/__pycache__/base.cpython-313.pyc and project_archieve_patch/app/features/__pycache__/base.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/features/__pycache__/load.cpython-313.pyc and project_archieve_patch/app/features/__pycache__/load.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/features/__pycache__/registry.cpython-313.pyc and project_archieve_patch/app/features/__pycache__/registry.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/features/cleaning/__pycache__/__init__.cpython-313.pyc and project_archieve_patch/app/features/cleaning/__pycache__/__init__.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/features/cleaning/__pycache__/feature.cpython-313.pyc and project_archieve_patch/app/features/cleaning/__pycache__/feature.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/features/cleaning/__pycache__/prompt.cpython-313.pyc and project_archieve_patch/app/features/cleaning/__pycache__/prompt.cpython-313.pyc differ
+diff -ruN project_archieve_extracted/project_archieve/app/features/cleaning/feature.py project_archieve_patch/app/features/cleaning/feature.py
+--- project_archieve_extracted/project_archieve/app/features/cleaning/feature.py	2026-09-16 13:45:38.000000000 +0000
++++ project_archieve_patch/app/features/cleaning/feature.py	2026-09-16 10:26:37.978430828 +0000
+@@ -1,6 +1,8 @@
+ import hashlib
+ import json
++import logging
+ import time
++import uuid
+ from pathlib import Path
+ 
+ from google import genai
+@@ -15,14 +17,17 @@
+ from app.services.circuit_breaker import allow_request, get_circuit, record_circuit_failure, record_circuit_success
+ from app.services.network import validate_proxy
+ from app.services.reading_text import cues_to_reading_text
+-from app.services.storage import register_text_artifact, work_dir
++from app.services.storage import artifact_dir, work_dir
+ from app.services.subtitles import cues_to_srt, cues_to_vtt, dump_cues, load_cues, split_cues
+ from app.services.task_queue import heartbeat
+ from app.services.token_manager import acquire_token, record_failure, record_success
+ from app.workers.exceptions import JobCancelled, JobPaused, RetryLater
+ 
+ 
+-CLEANING_CHECKPOINT_VERSION = "paragraphs-v1"
++logger = logging.getLogger("cleaning")
++
++
++CLEANING_CHECKPOINT_VERSION = "paragraphs-v2-validated"
+ 
+ 
+ class CleaningFeature:
+@@ -59,34 +64,112 @@
+             raise RuntimeError("Normalized subtitle data is missing")
+         return artifact
+ 
+-    def _register_cleaned(self, db: Session, job: Job, cues: list[dict]) -> None:
+-        stem = Path(job.original_name).stem
+-        final_text = cues_to_reading_text(cues)
+-        register_text_artifact(db, job.id, "final_text", f"{stem}.txt", final_text)
+-        register_text_artifact(
+-            db,
+-            job.id,
+-            "subtitle_cleaned_json",
+-            f"{stem}_cleaned.json",
+-            dump_cues(cues, job.original_name, "cleaned"),
+-            "application/json; charset=utf-8",
+-        )
+-        register_text_artifact(
+-            db,
+-            job.id,
+-            "subtitle_cleaned_srt",
+-            f"{stem}_cleaned.srt",
+-            cues_to_srt(cues),
+-            "application/x-subrip; charset=utf-8",
++    def _validate_cleaned_chunk(self, source_cues: list[dict], cleaned_items: list[dict]) -> list[dict]:
++        if not isinstance(cleaned_items, list):
++            raise RuntimeError("Cleaned subtitle checkpoint/result is not a list")
++        if len(cleaned_items) != len(source_cues):
++            raise RuntimeError(
++                f"Cleaned subtitle cue count mismatch: expected {len(source_cues)}, got {len(cleaned_items)}"
++            )
++
++        expected_ids = [str(cue.get("id", "")) for cue in source_cues]
++        returned_ids = [str(item.get("id", "")) for item in cleaned_items]
++        if returned_ids != expected_ids:
++            raise RuntimeError("Cleaned subtitle cue IDs do not exactly match normalized subtitle cue IDs")
++
++        source_chars = sum(
++            len("".join(str(cue.get("text", "")).split())) for cue in source_cues
+         )
+-        register_text_artifact(
+-            db,
+-            job.id,
+-            "subtitle_cleaned_vtt",
+-            f"{stem}_cleaned.vtt",
+-            cues_to_vtt(cues),
+-            "text/vtt; charset=utf-8",
++        cleaned_chars = sum(
++            len("".join(str(item.get("text", "")).split())) for item in cleaned_items
+         )
++        if source_chars >= 200:
++            ratio = cleaned_chars / source_chars if source_chars else 1.0
++            if ratio < 0.65 or ratio > 1.60:
++                raise RuntimeError(
++                    f"Cleaned subtitle content size changed too much: ratio={ratio:.2f}"
++                )
++
++        validated: list[dict] = []
++        for original, item in zip(source_cues, cleaned_items, strict=True):
++            text = str(item.get("text", "")).strip()
++            if not text:
++                raise RuntimeError(f"Cleaned subtitle text is empty for {original['id']}")
++            paragraph_after = item.get("paragraph_after", False)
++            if not isinstance(paragraph_after, bool):
++                raise RuntimeError(
++                    f"Cleaned subtitle paragraph_after is invalid for {original['id']}"
++                )
++            # Rebuild from the normalized cue so a checkpoint can never alter timing
++            # or other immutable subtitle fields.
++            validated.append(
++                {**original, "text": text, "paragraph_after": paragraph_after}
++            )
++        return validated
++
++    def _write_checkpoint(self, checkpoint: Path, cleaned: list[dict]) -> None:
++        temporary = checkpoint.with_suffix(checkpoint.suffix + ".tmp")
++        temporary.write_text(json.dumps(cleaned, ensure_ascii=False), encoding="utf-8")
++        temporary.replace(checkpoint)
++
++    def _register_cleaned(self, db: Session, job: Job, cues: list[dict]) -> None:
++        stem = Path(job.original_name).stem
++        generation = uuid.uuid4().hex[:12]
++        generation_dir = artifact_dir(job.id) / "cleaned" / generation
++        generation_dir.mkdir(parents=True, exist_ok=True)
++
++        outputs = [
++            ("final_text", f"{stem}.txt", cues_to_reading_text(cues), "text/plain; charset=utf-8"),
++            (
++                "subtitle_cleaned_json",
++                f"{stem}_cleaned.json",
++                dump_cues(cues, job.original_name, "cleaned"),
++                "application/json; charset=utf-8",
++            ),
++            (
++                "subtitle_cleaned_srt",
++                f"{stem}_cleaned.srt",
++                cues_to_srt(cues),
++                "application/x-subrip; charset=utf-8",
++            ),
++            (
++                "subtitle_cleaned_vtt",
++                f"{stem}_cleaned.vtt",
++                cues_to_vtt(cues),
++                "text/vtt; charset=utf-8",
++            ),
++        ]
++
++        prepared: list[tuple[str, str, Path, str]] = []
++        for kind, name, text, mime_type in outputs:
++            path = generation_dir / name
++            path.write_text(text, encoding="utf-8-sig")
++            prepared.append((kind, name, path, mime_type))
++
++        # Only after every new file exists do we repoint artifact records. The
++        # enclosing transaction is committed after the job is marked completed,
++        # so a failed re-clean leaves the previous artifact generation usable.
++        for kind, name, path, mime_type in prepared:
++            artifact = db.query(Artifact).filter(
++                Artifact.job_id == job.id,
++                Artifact.kind == kind,
++            ).first()
++            if artifact:
++                artifact.name = name
++                artifact.path = str(path)
++                artifact.mime_type = mime_type
++            else:
++                db.add(
++                    Artifact(
++                        id=str(uuid.uuid4()),
++                        job_id=job.id,
++                        kind=kind,
++                        name=name,
++                        path=str(path),
++                        mime_type=mime_type,
++                    )
++                )
++        db.flush()
+ 
+     def run(self, task_id: str) -> None:
+         with SessionLocal() as db:
+@@ -130,16 +213,54 @@
+                 )
+                 digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:12]
+                 checkpoint = checkpoint_dir / f"{index:06d}_{digest}.json"
++                cleaned: list[dict]
+                 if checkpoint.exists():
+-                    cleaned = json.loads(checkpoint.read_text(encoding="utf-8"))
++                    try:
++                        cached = json.loads(checkpoint.read_text(encoding="utf-8"))
++                        cleaned = self._validate_cleaned_chunk(chunk, cached)
++                        logger.info(
++                            "Cleanup checkpoint accepted job=%s chunk=%s/%s cues=%s",
++                            job.id,
++                            index + 1,
++                            len(chunks),
++                            len(cleaned),
++                        )
++                    except Exception as exc:
++                        logger.warning(
++                            "Cleanup checkpoint rejected job=%s chunk=%s/%s: %s",
++                            job.id,
++                            index + 1,
++                            len(chunks),
++                            exc,
++                        )
++                        checkpoint.unlink(missing_ok=True)
++                        cleaned = self._clean_cue_chunk(db, job.id, chunk, config)
++                        self._write_checkpoint(checkpoint, cleaned)
+                 else:
+                     cleaned = self._clean_cue_chunk(db, job.id, chunk, config)
+-                    checkpoint.write_text(json.dumps(cleaned, ensure_ascii=False), encoding="utf-8")
++                    self._write_checkpoint(checkpoint, cleaned)
+ 
+                 cleaned_cues.extend(cleaned)
+                 stage_progress = (index + 1) / max(1, len(chunks))
+-                heartbeat(db, task, stage_progress, 0.85 + stage_progress * 0.15)
++                heartbeat(
++                    db,
++                    task,
++                    stage_progress,
++                    0.85 + stage_progress * 0.15,
++                    detail=f"Cleaning chunk {index + 1}/{len(chunks)}",
++                )
++                logger.info(
++                    "Cleanup progress job=%s chunk=%s/%s cues=%s/%s",
++                    job.id,
++                    index + 1,
++                    len(chunks),
++                    len(cleaned_cues),
++                    len(cues),
++                )
+ 
++            # Validate the assembled output too. This catches any checkpoint or
++            # chunk-boundary corruption before final artifacts are replaced.
++            cleaned_cues = self._validate_cleaned_chunk(cues, cleaned_cues)
+             self._register_cleaned(db, job, cleaned_cues)
+             job.stage = "done"
+             job.status = "completed"
+@@ -185,19 +306,7 @@
+                 if returned_ids != expected_ids:
+                     raise RuntimeError("Gemini changed, removed, added or reordered subtitle cue IDs")
+ 
+-                cleaned: list[dict] = []
+-                for original, item in zip(cues, items, strict=True):
+-                    text = str(item.get("text", "")).strip()
+-                    if not text:
+-                        raise RuntimeError(f"Gemini returned empty text for {original['id']}")
+-                    paragraph_after = item.get("paragraph_after", False)
+-                    if not isinstance(paragraph_after, bool):
+-                        raise RuntimeError(
+-                            f"Gemini returned invalid paragraph_after for {original['id']}"
+-                        )
+-                    cleaned.append(
+-                        {**original, "text": text, "paragraph_after": paragraph_after}
+-                    )
++                cleaned = self._validate_cleaned_chunk(cues, items)
+ 
+                 usage = response.usage_metadata
+                 prompt_tokens = int(getattr(usage, "prompt_token_count", 0) or 0) if usage else 0
+Binary files project_archieve_extracted/project_archieve/app/features/transcription/__pycache__/__init__.cpython-313.pyc and project_archieve_patch/app/features/transcription/__pycache__/__init__.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/features/transcription/__pycache__/feature.cpython-313.pyc and project_archieve_patch/app/features/transcription/__pycache__/feature.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/services/__pycache__/__init__.cpython-313.pyc and project_archieve_patch/app/services/__pycache__/__init__.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/services/__pycache__/audio.cpython-313.pyc and project_archieve_patch/app/services/__pycache__/audio.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/services/__pycache__/circuit_breaker.cpython-313.pyc and project_archieve_patch/app/services/__pycache__/circuit_breaker.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/services/__pycache__/network.cpython-313.pyc and project_archieve_patch/app/services/__pycache__/network.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/services/__pycache__/presenters.cpython-313.pyc and project_archieve_patch/app/services/__pycache__/presenters.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/services/__pycache__/reading_text.cpython-313.pyc and project_archieve_patch/app/services/__pycache__/reading_text.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/services/__pycache__/storage.cpython-313.pyc and project_archieve_patch/app/services/__pycache__/storage.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/services/__pycache__/subtitles.cpython-313.pyc and project_archieve_patch/app/services/__pycache__/subtitles.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/services/__pycache__/task_queue.cpython-313.pyc and project_archieve_patch/app/services/__pycache__/task_queue.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/services/__pycache__/token_manager.cpython-313.pyc and project_archieve_patch/app/services/__pycache__/token_manager.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/services/__pycache__/worker_state.cpython-313.pyc and project_archieve_patch/app/services/__pycache__/worker_state.cpython-313.pyc differ
+diff -ruN project_archieve_extracted/project_archieve/app/services/task_queue.py project_archieve_patch/app/services/task_queue.py
+--- project_archieve_extracted/project_archieve/app/services/task_queue.py	2026-09-16 13:45:38.000000000 +0000
++++ project_archieve_patch/app/services/task_queue.py	2026-09-16 10:23:33.976709215 +0000
+@@ -80,6 +80,7 @@
+     task: Task,
+     progress: float | None = None,
+     job_progress: float | None = None,
++    detail: str | None = None,
+ ) -> None:
+     now = utcnow()
+     task.heartbeat_at = now
+@@ -88,6 +89,8 @@
+         worker.heartbeat_at = now
+         worker.status = "busy"
+         worker.current_job_id = task.job_id
++        if detail is not None:
++            worker.detail = detail
+     if progress is not None:
+         task.progress = max(0.0, min(1.0, progress))
+     if job_progress is not None:
+@@ -103,6 +106,7 @@
+             "progress": task.job.progress,
+             "task_id": task.id,
+             "task_progress": task.progress,
++            "detail": detail,
+         },
+     )
+     db.commit()
+Binary files project_archieve_extracted/project_archieve/app/workers/__pycache__/__init__.cpython-313.pyc and project_archieve_patch/app/workers/__pycache__/__init__.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/workers/__pycache__/exceptions.cpython-313.pyc and project_archieve_patch/app/workers/__pycache__/exceptions.cpython-313.pyc differ
+Binary files project_archieve_extracted/project_archieve/app/workers/__pycache__/runner.cpython-313.pyc and project_archieve_patch/app/workers/__pycache__/runner.cpython-313.pyc differ
+diff -ruN project_archieve_extracted/project_archieve/frontend/src/api/jobs.ts project_archieve_patch/frontend/src/api/jobs.ts
+--- project_archieve_extracted/project_archieve/frontend/src/api/jobs.ts	2026-09-16 13:45:38.000000000 +0000
++++ project_archieve_patch/frontend/src/api/jobs.ts	2026-09-16 10:24:02.786169891 +0000
+@@ -86,6 +86,11 @@
+   return data
+ }
+ 
++export async function recleanJob(jobId: string) {
++  const { data } = await api.post<Job>(`/jobs/${jobId}/reclean`)
++  return data
++}
++
+ export async function deleteJob(jobId: string) {
+   const { data } = await api.delete<{ deleted: string }>(`/jobs/${jobId}`)
+   return data
+diff -ruN project_archieve_extracted/project_archieve/frontend/src/components/files/file-item.tsx project_archieve_patch/frontend/src/components/files/file-item.tsx
+--- project_archieve_extracted/project_archieve/frontend/src/components/files/file-item.tsx	2026-09-16 13:45:38.000000000 +0000
++++ project_archieve_patch/frontend/src/components/files/file-item.tsx	2026-09-16 10:25:31.738818300 +0000
+@@ -1,9 +1,10 @@
+ import * as React from "react"
+-import { DownloadIcon, FileAudioIcon, MoreHorizontalIcon, PencilIcon, PlayIcon, TextIcon, Trash2Icon } from "lucide-react"
++import { DownloadIcon, FileAudioIcon, MoreHorizontalIcon, PencilIcon, PlayIcon, RefreshCcwIcon, TextIcon, Trash2Icon } from "lucide-react"
+ import { Link } from "react-router-dom"
+ import { toast } from "sonner"
+ 
+ import { artifactDownloadUrl } from "@/api/artifacts"
++import { recleanJob } from "@/api/jobs"
+ import { normalizeApiError } from "@/api/client"
+ import { audioDownloadUrl, deleteSourceAudio } from "@/api/files"
+ import { useAppData } from "@/app/app-data-provider"
+@@ -37,6 +38,7 @@
+   const { refreshJobs } = useAppData()
+   const [metadataOpen, setMetadataOpen] = React.useState(false)
+   const [deleteOpen, setDeleteOpen] = React.useState(false)
++  const [recleanOpen, setRecleanOpen] = React.useState(false)
+   const [busy, setBusy] = React.useState(false)
+   const [offlineBusy, setOfflineBusy] = React.useState(false)
+   const textArtifact = job ? preferredTextArtifact(job) : null
+@@ -76,6 +78,26 @@
+   }
+ 
+   const canSaveOffline = file.source_available && job?.status === "completed"
++  const hasNormalizedTranscript = job?.artifacts.some((artifact) => artifact.kind === "subtitle_normalized_json") ?? false
++  const cleaningBusy = job?.tasks.some(
++    (task) => task.kind === "clean_text" && ["queued", "retry_wait", "claimed", "running"].includes(task.status),
++  ) ?? false
++  const canReclean = Boolean(job && hasNormalizedTranscript && !cleaningBusy)
++
++  const reclean = async () => {
++    if (!job) return
++    setBusy(true)
++    try {
++      await recleanJob(job.id)
++      await refreshJobs()
++      setRecleanOpen(false)
++      toast.success("Cleanup queued again.")
++    } catch (error) {
++      toast.error(normalizeApiError(error).message)
++    } finally {
++      setBusy(false)
++    }
++  }
+ 
+   return (
+     <>
+@@ -95,6 +117,7 @@
+                 <DropdownMenuContent align="end">
+                   <DropdownMenuItem onSelect={() => setMetadataOpen(true)}><PencilIcon />Edit details</DropdownMenuItem>
+                   {canSaveOffline ? <DropdownMenuItem disabled={offlineBusy} onSelect={() => void toggleOffline()}><DownloadIcon />{offlineSaved ? "Remove offline copy" : "Save for offline"}</DropdownMenuItem> : null}
++                  {canReclean ? <DropdownMenuItem disabled={busy} onSelect={() => setRecleanOpen(true)}><RefreshCcwIcon />Re-clean transcript</DropdownMenuItem> : null}
+                   {file.source_available ? <DropdownMenuItem asChild><a href={audioDownloadUrl(file.id)}><DownloadIcon />Download audio</a></DropdownMenuItem> : null}
+                   {file.source_available && ["completed", "cancelled"].includes(file.job_status) ? <><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onSelect={() => setDeleteOpen(true)}><Trash2Icon />Delete source audio</DropdownMenuItem></> : null}
+                 </DropdownMenuContent>
+@@ -119,6 +142,7 @@
+       </div>
+ 
+       <FileMetadataDialog file={file} open={metadataOpen} onOpenChange={setMetadataOpen} onUpdated={onFileUpdated} />
++      <ConfirmDialog open={recleanOpen} onOpenChange={setRecleanOpen} title="Run cleanup again?" description="Cleanup will run again from the normalized transcript. Audio will not be retranscribed, and the current cleaned files stay available until the new cleanup succeeds." confirmLabel="Re-clean transcript" busy={busy} onConfirm={reclean} />
+       <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title="Delete the source audio?" description="The original recording will be removed from the server. Existing transcript and subtitle files will stay available." confirmLabel="Delete audio" destructive busy={busy} onConfirm={deleteAudio} />
+     </>
+   )
+diff -ruN project_archieve_extracted/project_archieve/frontend/src/components/jobs/job-actions.tsx project_archieve_patch/frontend/src/components/jobs/job-actions.tsx
+--- project_archieve_extracted/project_archieve/frontend/src/components/jobs/job-actions.tsx	2026-09-16 13:45:38.000000000 +0000
++++ project_archieve_patch/frontend/src/components/jobs/job-actions.tsx	2026-09-16 10:25:31.737594176 +0000
+@@ -3,7 +3,7 @@
+ import { Link } from "react-router-dom"
+ import { toast } from "sonner"
+ 
+-import { cancelJob, pauseJob, resumeJob, retryJob } from "@/api/jobs"
++import { cancelJob, pauseJob, recleanJob, resumeJob, retryJob } from "@/api/jobs"
+ import { artifactDownloadUrl } from "@/api/artifacts"
+ import { useAppData } from "@/app/app-data-provider"
+ import { ConfirmDialog } from "@/components/common/confirm-dialog"
+@@ -17,6 +17,7 @@
+   const { setJob } = useAppData()
+   const [busy, setBusy] = React.useState(false)
+   const [confirmCancel, setConfirmCancel] = React.useState(false)
++  const [confirmReclean, setConfirmReclean] = React.useState(false)
+   const textArtifact = preferredTextArtifact(job)
+   const finalArtifact = finalTextArtifact(job)
+ 
+@@ -37,6 +38,11 @@
+   const canResume = job.is_paused && !["completed", "cancelled"].includes(job.status)
+   const canCancel = !["completed", "cancelled"].includes(job.status)
+   const canRetry = ["failed", "cancelled"].includes(job.status)
++  const hasNormalizedTranscript = job.artifacts.some((artifact) => artifact.kind === "subtitle_normalized_json")
++  const cleaningBusy = job.tasks.some(
++    (task) => task.kind === "clean_text" && ["queued", "retry_wait", "claimed", "running"].includes(task.status),
++  )
++  const canReclean = hasNormalizedTranscript && !cleaningBusy
+ 
+   return (
+     <>
+@@ -69,12 +75,26 @@
+             {canPause ? <DropdownMenuItem onSelect={() => void run(() => pauseJob(job.id))}><PauseIcon />Pause</DropdownMenuItem> : null}
+             {canResume ? <DropdownMenuItem onSelect={() => void run(() => resumeJob(job.id))}><RotateCcwIcon />Resume</DropdownMenuItem> : null}
+             {canRetry ? <DropdownMenuItem onSelect={() => void run(() => retryJob(job.id), "Job queued again.")}><RefreshCcwIcon />Retry</DropdownMenuItem> : null}
++            {canReclean ? <DropdownMenuItem onSelect={() => setConfirmReclean(true)}><RefreshCcwIcon />Re-clean transcript</DropdownMenuItem> : null}
+             {canCancel ? <><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onSelect={() => setConfirmCancel(true)}><SquareIcon />Cancel</DropdownMenuItem></> : null}
+           </DropdownMenuContent>
+         </DropdownMenu>
+       </div>
+ 
+       <ConfirmDialog
++        open={confirmReclean}
++        onOpenChange={setConfirmReclean}
++        title="Run cleanup again?"
++        description="Cleanup will run again from the normalized transcript. Audio will not be retranscribed, and the current cleaned files stay available until the new cleanup succeeds."
++        confirmLabel="Re-clean transcript"
++        busy={busy}
++        onConfirm={async () => {
++          await run(() => recleanJob(job.id), "Cleanup queued again.")
++          setConfirmReclean(false)
++        }}
++      />
++
++      <ConfirmDialog
+         open={confirmCancel}
+         onOpenChange={setConfirmCancel}
+         title="Cancel this job?"

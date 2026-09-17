@@ -9,7 +9,9 @@ from app.db import utcnow
 from app.models import Job, Task, WorkerState
 
 
-def enqueue_task(db: Session, job_id: str, kind: str, queue: str, next_run_at=None) -> Task:
+def enqueue_task(
+    db: Session, job_id: str, kind: str, queue: str, next_run_at=None
+) -> Task:
     task = Task(
         id=str(uuid.uuid4()),
         job_id=job_id,
@@ -70,7 +72,12 @@ def start_task(db: Session, task: Task) -> None:
         f"{task.kind} started",
         task.job_id,
         event_type="job.status",
-        data={"status": "running", "stage": task.job.stage, "task_id": task.id, "task_kind": task.kind},
+        data={
+            "status": "running",
+            "stage": task.job.stage,
+            "task_id": task.id,
+            "task_kind": task.kind,
+        },
     )
     db.commit()
 
@@ -80,6 +87,7 @@ def heartbeat(
     task: Task,
     progress: float | None = None,
     job_progress: float | None = None,
+    detail: str | None = None,
 ) -> None:
     now = utcnow()
     task.heartbeat_at = now
@@ -88,6 +96,8 @@ def heartbeat(
         worker.heartbeat_at = now
         worker.status = "busy"
         worker.current_job_id = task.job_id
+        if detail is not None:
+            worker.detail = detail
     if progress is not None:
         task.progress = max(0.0, min(1.0, progress))
     if job_progress is not None:
@@ -103,6 +113,7 @@ def heartbeat(
             "progress": task.job.progress,
             "task_id": task.id,
             "task_progress": task.progress,
+            "detail": detail,
         },
     )
     db.commit()
