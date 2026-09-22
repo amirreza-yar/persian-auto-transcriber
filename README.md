@@ -1,4 +1,4 @@
-# Persian Auto Transpiler
+# Persian Auto Transcriber
 
 A self-hosted Persian speech-to-text platform for long-form audio. Persian STT combines local CPU transcription with Faster-Whisper, optional Gemini-based text cleanup, synchronized subtitles, resumable background jobs, and a responsive React PWA for reviewing, editing, downloading, and keeping selected recordings available offline.
 
