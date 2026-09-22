@@ -1,4 +1,4 @@
-# Persian Auto Transpiler Frontend
+# Persian Auto Transcriber Frontend
 
 This document describes the React frontend used by the main Persian STT application: architecture, pages, data flow, synchronized playback, local transcript editing, PWA behavior, IndexedDB offline storage, and production deployment.
 
