@@ -20,6 +20,7 @@ from app.services.circuit_breaker import (
     record_circuit_failure,
     record_circuit_success,
 )
+from app.services.cleanup_integrity import validate_cleaned_chunk
 from app.services.network import validate_proxy
 from app.services.reading_text import cues_to_reading_text
 from app.services.storage import artifact_dir, work_dir
@@ -89,55 +90,6 @@ class CleaningFeature:
         if not artifact:
             raise RuntimeError("Normalized subtitle data is missing")
         return artifact
-
-    def _validate_cleaned_chunk(
-        self, source_cues: list[dict], cleaned_items: list[dict]
-    ) -> list[dict]:
-        if not isinstance(cleaned_items, list):
-            raise RuntimeError("Cleaned subtitle checkpoint/result is not a list")
-        if len(cleaned_items) != len(source_cues):
-            raise RuntimeError(
-                f"Cleaned subtitle cue count mismatch: expected {len(source_cues)}, got {len(cleaned_items)}"
-            )
-
-        expected_ids = [str(cue.get("id", "")) for cue in source_cues]
-        returned_ids = [str(item.get("id", "")) for item in cleaned_items]
-        if returned_ids != expected_ids:
-            raise RuntimeError(
-                "Cleaned subtitle cue IDs do not exactly match normalized subtitle cue IDs"
-            )
-
-        source_chars = sum(
-            len("".join(str(cue.get("text", "")).split())) for cue in source_cues
-        )
-        cleaned_chars = sum(
-            len("".join(str(item.get("text", "")).split())) for item in cleaned_items
-        )
-        if source_chars >= 200:
-            ratio = cleaned_chars / source_chars if source_chars else 1.0
-            if ratio < 0.65 or ratio > 1.60:
-                raise RuntimeError(
-                    f"Cleaned subtitle content size changed too much: ratio={ratio:.2f}"
-                )
-
-        validated: list[dict] = []
-        for original, item in zip(source_cues, cleaned_items, strict=True):
-            text = str(item.get("text", "")).strip()
-            if not text:
-                raise RuntimeError(
-                    f"Cleaned subtitle text is empty for {original['id']}"
-                )
-            paragraph_after = item.get("paragraph_after", False)
-            if not isinstance(paragraph_after, bool):
-                raise RuntimeError(
-                    f"Cleaned subtitle paragraph_after is invalid for {original['id']}"
-                )
-            # Rebuild from the normalized cue so a checkpoint can never alter timing
-            # or other immutable subtitle fields.
-            validated.append(
-                {**original, "text": text, "paragraph_after": paragraph_after}
-            )
-        return validated
 
     def _write_checkpoint(self, checkpoint: Path, cleaned: list[dict]) -> None:
         temporary = checkpoint.with_suffix(checkpoint.suffix + ".tmp")
@@ -270,7 +222,7 @@ class CleaningFeature:
                 if checkpoint.exists():
                     try:
                         cached = json.loads(checkpoint.read_text(encoding="utf-8"))
-                        cleaned = self._validate_cleaned_chunk(chunk, cached)
+                        cleaned = validate_cleaned_chunk(chunk, cached)
                         logger.info(
                             "Cleanup checkpoint accepted job=%s chunk=%s/%s cues=%s",
                             job.id,
@@ -313,7 +265,7 @@ class CleaningFeature:
 
             # Validate the assembled output too. This catches any checkpoint or
             # chunk-boundary corruption before final artifacts are replaced.
-            cleaned_cues = self._validate_cleaned_chunk(cues, cleaned_cues)
+            cleaned_cues = validate_cleaned_chunk(cues, cleaned_cues)
             self._register_cleaned(db, job, cleaned_cues)
             job.stage = "done"
             job.status = "completed"
@@ -349,7 +301,10 @@ class CleaningFeature:
 
             acquired = acquire_token(db, "gemini")
             if not acquired:
-                raise RetryLater(last_error, int(config["retry_base_seconds"]))
+                raise RetryLater(
+                    f"Cleanup chunk remains pending; it was not checkpointed. {last_error}",
+                    int(config["retry_base_seconds"]),
+                )
 
             token, api_key = acquired
             client = None
@@ -374,7 +329,7 @@ class CleaningFeature:
                         "Gemini changed, removed, added or reordered subtitle cue IDs"
                     )
 
-                cleaned = self._validate_cleaned_chunk(cues, items)
+                cleaned = validate_cleaned_chunk(cues, items)
 
                 usage = response.usage_metadata
                 prompt_tokens = (
@@ -492,4 +447,7 @@ class CleaningFeature:
             if attempt + 1 < attempts:
                 time.sleep(min(int(config["retry_base_seconds"]) * (2**attempt), 60))
 
-        raise RetryLater(last_error, int(config["retry_base_seconds"]))
+        raise RetryLater(
+            f"Cleanup chunk remains pending; it was not checkpointed. {last_error}",
+            int(config["retry_base_seconds"]),
+        )

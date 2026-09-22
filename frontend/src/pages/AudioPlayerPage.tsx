@@ -3,9 +3,11 @@ import {
   ArrowLeftIcon,
   CheckIcon,
   DownloadIcon,
+  MinusIcon,
   PauseIcon,
   PencilIcon,
   PlayIcon,
+  PlusIcon,
   Repeat2Icon,
   RotateCcwIcon,
   RotateCwIcon,
@@ -621,11 +623,33 @@ export function AudioPlayerPage() {
     });
   }, [cancelEditLoopCycle, editingCueId]);
 
-  const cycleRate = () => {
-    const rates = [0.5, 0.8, 1, 1.25, 1.5, 2];
-    const next = rates[(rates.indexOf(rate) + 1) % rates.length];
-    setRate(next);
-    if (audioRef.current) audioRef.current.playbackRate = next;
+  // const cycleRate = () => {
+  //   const rates = [0.5, 0.8, 1, 1.25, 1.5, 2];
+  //   const next = rates[(rates.indexOf(rate) + 1) % rates.length];
+  //   setRate(next);
+  //   if (audioRef.current) audioRef.current.playbackRate = next;
+  // };
+
+  const cycleRateInc = () => {
+    const rates = [
+      0.4, 0.5, 0.6, 0.8, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3,
+    ];
+    const next = rates[rates.indexOf(rate) + 1];
+    if (next) {
+      setRate(next);
+      if (audioRef.current) audioRef.current.playbackRate = next;
+    }
+  };
+
+  const cycleRateDec = () => {
+    const rates = [
+      0.4, 0.5, 0.6, 0.8, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3,
+    ];
+    const prev = rates[rates.indexOf(rate) - 1];
+    if (prev) {
+      setRate(prev);
+      if (audioRef.current) audioRef.current.playbackRate = prev;
+    }
   };
 
   const saveOffline = async () => {
@@ -843,14 +867,15 @@ export function AudioPlayerPage() {
                   <RotateCwIcon />
                 </Button>
 
-                <Button
-                  className="absolute left-0"
-                  variant="outline"
-                  size="sm"
-                  onClick={cycleRate}
-                >
-                  {rate}×
-                </Button>
+                <div className="absolute left-0 flex items-center gap-1 rounded-lg border">
+                  <Button variant="ghost" size="icon-sm" onClick={cycleRateDec}>
+                    <MinusIcon className="size-3" />
+                  </Button>
+                  <p className="text-sm w-8 text-center">{rate}×</p>
+                  <Button variant="ghost" size="icon-sm" onClick={cycleRateInc}>
+                    <PlusIcon className="size-3" />
+                  </Button>
+                </div>
 
                 <Button
                   className="absolute right-0"
