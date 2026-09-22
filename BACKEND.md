@@ -1,4 +1,4 @@
-# Persian Auto Transpiler Backend
+# Persian Auto Transcriber Backend
 
 This document describes the backend architecture, processing model, persistence, cleanup-integrity system, APIs, and operational behavior of Persian STT.
 
