@@ -1,8 +1,10 @@
 import * as React from "react";
+
 import {
   ArrowLeftIcon,
   CheckIcon,
   DownloadIcon,
+  KeyboardIcon,
   MinusIcon,
   PauseIcon,
   PencilIcon,
@@ -13,44 +15,62 @@ import {
   RotateCwIcon,
   WifiOffIcon,
 } from "lucide-react";
+
 import { Link, useParams } from "react-router-dom";
+
 import { toast } from "sonner";
 
 import { normalizeApiError } from "@/api/client";
+
 import { audioStreamUrl, getAudioFile } from "@/api/files";
+
 import { getJob } from "@/api/jobs";
+
 import { getBestSubtitles } from "@/api/subtitles";
+
 import { Badge } from "@/components/ui/badge";
+
 import { Button } from "@/components/ui/button";
+
 import { Slider } from "@/components/ui/slider";
+
 import { Textarea } from "@/components/ui/textarea";
+
 import {
   getCueEditsForFile,
   getOfflineBundle,
   saveCueEdit,
   type OfflineBundle,
 } from "@/lib/offline-db";
+
 import { saveFileForOffline } from "@/lib/offline-sync";
+
 import { formatDuration } from "@/lib/format";
+
 import {
   cueDisplayText,
   cuesToPlainText,
   downloadTextFile,
   transcriptDownloadName,
 } from "@/lib/transcript";
+
 import type { AudioFile, Job, SubtitleCue } from "@/types/api";
 
 function findActiveCueIndex(cues: SubtitleCue[], time: number) {
   if (!cues.length) return -1;
 
   let low = 0;
+
   let high = cues.length - 1;
+
   let candidate = -1;
 
   while (low <= high) {
     const mid = (low + high) >> 1;
+
     if (cues[mid].start <= time) {
       candidate = mid;
+
       low = mid + 1;
     } else {
       high = mid - 1;
@@ -60,17 +80,48 @@ function findActiveCueIndex(cues: SubtitleCue[], time: number) {
   return candidate;
 }
 
+function isEditableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+
+  return (
+    target.isContentEditable ||
+    target.tagName === "INPUT" ||
+    target.tagName === "TEXTAREA" ||
+    target.tagName === "SELECT"
+  );
+}
+
+const PLAYER_SHORTCUTS = [
+  ["Space", "Play / pause"],
+  ["← / →", "Jump 5 seconds backward / forward"],
+  ["Ctrl + ← / →", "Jump 30 seconds backward / forward"],
+  ["↑ / ↓", "Previous / next transcript cue"],
+  ["Enter", "Edit active cue / apply current edit"],
+  ["- / =", "Decrease / increase playback speed"],
+  ["L", "Toggle edit loop"],
+  ["Ctrl + Shift + S", "Save for offline use"],
+  ["Ctrl + Shift + D", "Download edited transcript"],
+] as const;
+
 const TranscriptPane = React.memo(function TranscriptPane({
   cues,
+
   edits,
+
   activeIndex,
-  onSeek,
+
+  onActivate,
+
   onEdit,
 }: {
   cues: SubtitleCue[];
+
   edits: Record<string, string>;
+
   activeIndex: number;
-  onSeek: (seconds: number) => void;
+
+  onActivate: (cue: SubtitleCue) => void;
+
   onEdit: (cue: SubtitleCue) => void;
 }) {
   const activeRef = React.useRef<HTMLDivElement | null>(null);
@@ -80,11 +131,17 @@ const TranscriptPane = React.memo(function TranscriptPane({
   }, [activeIndex]);
 
   // A one-hour recording can contain 4k-5k cues. Rendering all of them every
+
   // time playback moves is expensive, so keep only a generous window around
+
   // the current cue in the DOM.
+
   const center = activeIndex >= 0 ? activeIndex : 0;
+
   const start = Math.max(0, center - 120);
+
   const end = Math.min(cues.length, center + 181);
+
   const visible = cues.slice(start, end);
 
   return (
@@ -94,7 +151,7 @@ const TranscriptPane = React.memo(function TranscriptPane({
           variant="ghost"
           size="sm"
           className="mb-2 w-full"
-          onClick={() => onSeek(cues[Math.max(0, start - 180)].start)}
+          onClick={() => onActivate(cues[Math.max(0, start - 180)])}
         >
           Earlier transcript
         </Button>
@@ -102,8 +159,11 @@ const TranscriptPane = React.memo(function TranscriptPane({
 
       {visible.map((cue, offset) => {
         const index = start + offset;
+
         const active = index === activeIndex;
+
         const edited = edits[cue.id] !== undefined;
+
         const text = cueDisplayText(cue, edits);
 
         return (
@@ -114,12 +174,14 @@ const TranscriptPane = React.memo(function TranscriptPane({
           >
             <button
               type="button"
-              onClick={() => onEdit(cue)}
+              onClick={() => onActivate(cue)}
+              onDoubleClick={() => onEdit(cue)}
               className="min-w-0 flex-1 text-left"
             >
               <span className="text-muted-foreground mb-1 block text-[11px] tabular-nums">
                 {formatDuration(cue.start)}
               </span>
+
               <span
                 dir="rtl"
                 lang="fa"
@@ -128,6 +190,7 @@ const TranscriptPane = React.memo(function TranscriptPane({
                 {text}
               </span>
             </button>
+
             <Button
               variant="ghost"
               size="icon-sm"
@@ -150,9 +213,7 @@ const TranscriptPane = React.memo(function TranscriptPane({
           variant="ghost"
           size="sm"
           className="mt-2 w-full"
-          onClick={() =>
-            onSeek(cues[Math.min(cues.length - 1, end + 179)].start)
-          }
+          onClick={() => onActivate(cues[Math.min(cues.length - 1, end + 179)])}
         >
           Later transcript
         </Button>
@@ -169,43 +230,61 @@ const CueEditor = React.forwardRef<
   CueEditorHandle,
   {
     cue: SubtitleCue;
+
     initialText: string;
+
     fileId: string;
+
     jobId: string;
+
     onCommitted: (cueId: string, text: string, originalText: string) => void;
+
     onClose: () => void;
   }
 >(function CueEditor(
   { cue, initialText, fileId, jobId, onCommitted, onClose },
+
   ref,
 ) {
   const [draft, setDraft] = React.useState(initialText);
+
   const [saveState, setSaveState] = React.useState<"idle" | "saving" | "saved">(
     "idle",
   );
+
   const draftRef = React.useRef(draft);
+
   const lastSavedRef = React.useRef(initialText);
 
   React.useEffect(() => {
     setDraft(initialText);
+
     draftRef.current = initialText;
+
     lastSavedRef.current = initialText;
+
     setSaveState("idle");
   }, [cue.id, initialText]);
 
   React.useEffect(() => {
     draftRef.current = draft;
+
     if (draft === lastSavedRef.current) return;
 
     setSaveState("idle");
+
     const timer = window.setTimeout(() => {
       const text = draftRef.current;
+
       setSaveState("saving");
+
       void saveCueEdit(fileId, jobId, cue.id, text, cue.text)
         .then(() => {
           lastSavedRef.current = text;
+
           setSaveState("saved");
         })
+
         .catch(() => setSaveState("idle"));
     }, 650);
 
@@ -217,11 +296,14 @@ const CueEditor = React.forwardRef<
 
     if (text !== lastSavedRef.current) {
       setSaveState("saving");
+
       await saveCueEdit(fileId, jobId, cue.id, text, cue.text);
+
       lastSavedRef.current = text;
     }
 
     onCommitted(cue.id, text, cue.text);
+
     setSaveState("saved");
   }, [cue.id, cue.text, fileId, jobId, onCommitted]);
 
@@ -230,6 +312,7 @@ const CueEditor = React.forwardRef<
   const commitAndClose = async () => {
     try {
       await commit();
+
       onClose();
     } catch (error) {
       toast.error(
@@ -240,11 +323,16 @@ const CueEditor = React.forwardRef<
 
   const reset = async () => {
     setDraft(cue.text);
+
     draftRef.current = cue.text;
+
     try {
       await saveCueEdit(fileId, jobId, cue.id, cue.text, cue.text);
+
       lastSavedRef.current = cue.text;
+
       onCommitted(cue.id, cue.text, cue.text);
+
       setSaveState("saved");
     } catch (error) {
       toast.error(
@@ -263,12 +351,14 @@ const CueEditor = React.forwardRef<
               ? "Saved locally"
               : "Changes stay on this device"}
         </span>
+
         <div className="flex gap-1">
           {draft !== cue.text ? (
             <Button size="sm" variant="ghost" onClick={() => void reset()}>
               Reset
             </Button>
           ) : null}
+
           <Button
             size="sm"
             variant="ghost"
@@ -278,6 +368,7 @@ const CueEditor = React.forwardRef<
           </Button>
         </div>
       </div>
+
       <Textarea
         dir="rtl"
         lang="fa"
@@ -292,67 +383,105 @@ const CueEditor = React.forwardRef<
 
 export function AudioPlayerPage() {
   const { jobId: fileId = "" } = useParams();
+
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
+
   const cueEditorRef = React.useRef<CueEditorHandle | null>(null);
+
   const loopFrameRef = React.useRef<number | null>(null);
+
   const loopDelayRef = React.useRef<number | null>(null);
+
   const loopPauseRef = React.useRef(false);
 
   const [file, setFile] = React.useState<AudioFile | null>(null);
+
   const [job, setJob] = React.useState<Job | null>(null);
+
   const [offlineBundle, setOfflineBundle] =
     React.useState<OfflineBundle | null>(null);
+
   const [cues, setCues] = React.useState<SubtitleCue[]>([]);
+
   const [edits, setEdits] = React.useState<Record<string, string>>({});
+
   const [cleanedText, setCleanedText] = React.useState("");
+
   const [currentTime, setCurrentTime] = React.useState(0);
+
   const [duration, setDuration] = React.useState(0);
+
   const [playing, setPlaying] = React.useState(false);
+
   const [rate, setRate] = React.useState(1);
+
   const [editLoopEnabled, setEditLoopEnabled] = React.useState(false);
+
   const [editingCueId, setEditingCueId] = React.useState<string | null>(null);
+
   const [useOfflineAudio, setUseOfflineAudio] = React.useState(false);
+
   const [offlineSaving, setOfflineSaving] = React.useState(false);
+
   const [loading, setLoading] = React.useState(true);
+
+  const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
 
   React.useEffect(() => {
     let cancelled = false;
 
     const load = async () => {
       const cached = await getOfflineBundle(fileId).catch(() => null);
+
       if (!cancelled && cached) {
         setOfflineBundle(cached);
+
         setCues(cached.transcript?.cues ?? []);
+
         setCleanedText(cached.transcript?.cleanedText ?? "");
+
         setEdits(cached.edits);
+
         setDuration(cached.file.durationSeconds ?? 0);
+
         if (!navigator.onLine) setUseOfflineAudio(true);
       }
 
       try {
         const serverFile = await getAudioFile(fileId);
+
         const serverJob = await getJob(serverFile.job_id);
+
         const [subtitle, localEdits] = await Promise.all([
           getBestSubtitles(serverJob.id),
+
           getCueEditsForFile(serverFile.id),
         ]);
 
         if (cancelled) return;
+
         setFile(serverFile);
+
         setJob(serverJob);
+
         setCues(subtitle?.cues ?? cached?.transcript?.cues ?? []);
+
         setCleanedText(cached?.transcript?.cleanedText ?? "");
+
         setEdits(localEdits);
+
         setDuration(
           serverFile.duration_seconds ??
             serverJob.duration_seconds ??
             cached?.file.durationSeconds ??
             0,
         );
+
         setUseOfflineAudio(false);
       } catch (error) {
         if (!cached && !cancelled)
           toast.error(normalizeApiError(error).message);
+
         if (cached && !cancelled) setUseOfflineAudio(true);
       } finally {
         if (!cancelled) setLoading(false);
@@ -360,6 +489,7 @@ export function AudioPlayerPage() {
     };
 
     void load();
+
     return () => {
       cancelled = true;
     };
@@ -367,6 +497,7 @@ export function AudioPlayerPage() {
 
   const offlineAudioUrl = React.useMemo(() => {
     if (!offlineBundle?.file.audioBlob) return null;
+
     return URL.createObjectURL(offlineBundle.file.audioBlob);
   }, [offlineBundle]);
 
@@ -374,41 +505,53 @@ export function AudioPlayerPage() {
     () => () => {
       if (offlineAudioUrl) URL.revokeObjectURL(offlineAudioUrl);
     },
+
     [offlineAudioUrl],
   );
 
   const playbackActiveIndex = React.useMemo(
     () => findActiveCueIndex(cues, currentTime),
+
     [cues, currentTime],
   );
 
   const editingCueIndex = React.useMemo(
     () =>
       editingCueId ? cues.findIndex((cue) => cue.id === editingCueId) : -1,
+
     [cues, editingCueId],
   );
 
   // Keep the visible transcript pinned to the cue being edited while edit-loop
+
   // mode is active. At the exact cue boundary the audio element can report a
+
   // time that belongs to the next cue for a few milliseconds before the
+
   // 300 ms replay delay starts. Using playbackActiveIndex directly would make
+
   // the highlighted/current subtitle briefly jump forward and then back.
+
   const activeIndex =
     editLoopEnabled && editingCueIndex >= 0
       ? editingCueIndex
       : playbackActiveIndex;
 
   const activeCue = activeIndex >= 0 ? cues[activeIndex] : null;
+
   const previousCue = activeIndex > 0 ? cues[activeIndex - 1] : null;
+
   const nextCue =
     activeIndex >= 0 && activeIndex < cues.length - 1
       ? cues[activeIndex + 1]
       : null;
+
   const editingCue = React.useMemo(
     () =>
       editingCueId
         ? (cues.find((cue) => cue.id === editingCueId) ?? null)
         : null,
+
     [cues, editingCueId],
   );
 
@@ -417,7 +560,9 @@ export function AudioPlayerPage() {
     offlineBundle?.file.name ??
     job?.original_name ??
     "Audio player";
+
   const editJobId = job?.id ?? offlineBundle?.file.jobId ?? "";
+
   const audioSource = useOfflineAudio
     ? (offlineAudioUrl ?? undefined)
     : file?.source_available
@@ -426,16 +571,21 @@ export function AudioPlayerPage() {
 
   const toggle = async () => {
     const audio = audioRef.current;
+
     if (!audio) return;
+
     if (audio.paused) await audio.play();
     else audio.pause();
   };
 
   const seekBy = (seconds: number) => {
     const audio = audioRef.current;
+
     if (!audio) return;
+
     audio.currentTime = Math.max(
       0,
+
       Math.min(audio.duration || duration, audio.currentTime + seconds),
     );
   };
@@ -444,14 +594,32 @@ export function AudioPlayerPage() {
     if (audioRef.current) audioRef.current.currentTime = seconds;
   }, []);
 
+  const seekToAndPlay = React.useCallback((seconds: number) => {
+    const audio = audioRef.current;
+
+    if (!audio) return;
+
+    audio.currentTime = seconds;
+
+    setCurrentTime(seconds);
+
+    void audio.play().catch(() => {
+      toast.error("Could not start audio playback.");
+    });
+  }, []);
+
   const cancelEditLoopCycle = React.useCallback(() => {
     loopPauseRef.current = false;
+
     if (loopFrameRef.current !== null) {
       window.cancelAnimationFrame(loopFrameRef.current);
+
       loopFrameRef.current = null;
     }
+
     if (loopDelayRef.current !== null) {
       window.clearTimeout(loopDelayRef.current);
+
       loopDelayRef.current = null;
     }
   }, []);
@@ -460,26 +628,35 @@ export function AudioPlayerPage() {
     (cueId: string, text: string, originalText: string) => {
       setEdits((current) => {
         const next = { ...current };
+
         if (text === originalText) delete next[cueId];
         else next[cueId] = text;
+
         return next;
       });
     },
+
     [],
   );
 
   const startEditing = React.useCallback(
     async (cue: SubtitleCue) => {
       // Clicking the cue that is already open should not tear down/restart its
+
       // current loop or editor state.
+
       if (editingCueId === cue.id) return;
 
       const audio = audioRef.current;
+
       const switchingCue = Boolean(editingCueId && editingCueId !== cue.id);
 
       // Before replacing the editor with another cue, force-save whatever is
+
       // currently in the textarea. This avoids losing the last debounced
+
       // characters when the user moves quickly through the transcript.
+
       if (switchingCue) {
         try {
           await cueEditorRef.current?.commit();
@@ -489,33 +666,45 @@ export function AudioPlayerPage() {
               ? error.message
               : "Could not save the current subtitle edit.",
           );
+
           return;
         }
       }
 
       cancelEditLoopCycle();
+
       setEditingCueId(cue.id);
 
       if (!audio) return;
 
       if (!editLoopEnabled) {
         // Normal edit mode: select the clicked cue, pause there, and let the
+
         // editor swap to that cue immediately.
+
         audio.pause();
+
         audio.currentTime = cue.start;
+
         setCurrentTime(cue.start);
+
         return;
       }
 
       // In loop mode, clicking a different cue always starts that cue from
+
       // the beginning. If the user starts editing the cue that is already
+
       // playing, keep the current playback position and let it reach the end
+
       // naturally before the first replay.
+
       const insideCue =
         audio.currentTime >= cue.start && audio.currentTime < cue.end;
 
       if (switchingCue || !insideCue) {
         audio.currentTime = cue.start;
+
         setCurrentTime(cue.start);
       }
 
@@ -523,16 +712,51 @@ export function AudioPlayerPage() {
         toast.error("Could not start audio for edit loop.");
       });
     },
+
     [cancelEditLoopCycle, editLoopEnabled, editingCueId],
+  );
+
+  const activateCueForPlayback = React.useCallback(
+    async (cue: SubtitleCue) => {
+      // Navigation and editing are separate interactions now. If the user
+
+      // navigates to another cue while an edit is open, commit that edit first
+
+      // so playback can move without losing text or being pulled back by loop.
+
+      if (editingCueId && editingCueId !== cue.id) {
+        try {
+          await cueEditorRef.current?.commit();
+        } catch (error) {
+          toast.error(
+            error instanceof Error
+              ? error.message
+              : "Could not save the current subtitle edit.",
+          );
+
+          return;
+        }
+
+        cancelEditLoopCycle();
+
+        setEditingCueId(null);
+      }
+
+      seekToAndPlay(cue.start);
+    },
+
+    [cancelEditLoopCycle, editingCueId, seekToAndPlay],
   );
 
   React.useEffect(() => {
     if (!editLoopEnabled || !editingCue) {
       cancelEditLoopCycle();
+
       return;
     }
 
     const audio = audioRef.current;
+
     if (!audio) return;
 
     let cancelled = false;
@@ -541,6 +765,7 @@ export function AudioPlayerPage() {
       if (cancelled) return;
 
       audio.currentTime = editingCue.start;
+
       setCurrentTime(editingCue.start);
 
       void audio.play().catch(() => {
@@ -555,18 +780,27 @@ export function AudioPlayerPage() {
 
       if (audio.currentTime >= editingCue.end) {
         // This pause is part of the loop itself, not a user pause. Keep the
+
         // transport controls visually in the playing state during the 300 ms
+
         // gap so the player does not flash between Play/Pause icons.
+
         loopPauseRef.current = true;
+
         audio.pause();
+
         audio.currentTime = editingCue.end;
+
         setCurrentTime(editingCue.end);
 
         loopFrameRef.current = null;
+
         loopDelayRef.current = window.setTimeout(() => {
           loopDelayRef.current = null;
+
           playFromStart();
         }, 300);
+
         return;
       }
 
@@ -578,6 +812,7 @@ export function AudioPlayerPage() {
       audio.currentTime >= editingCue.end
     ) {
       audio.currentTime = editingCue.start;
+
       setCurrentTime(editingCue.start);
     }
 
@@ -591,6 +826,7 @@ export function AudioPlayerPage() {
 
     return () => {
       cancelled = true;
+
       cancelEditLoopCycle();
     };
   }, [cancelEditLoopCycle, editLoopEnabled, editingCue]);
@@ -599,8 +835,11 @@ export function AudioPlayerPage() {
     const audio = audioRef.current;
 
     // Stop any pending replay first. Do not seek anywhere: finishing an edit
+
     // should continue from the exact point at which the user pressed Done.
+
     cancelEditLoopCycle();
+
     setEditingCueId(null);
 
     if (!audio) return;
@@ -610,12 +849,29 @@ export function AudioPlayerPage() {
     });
   }, [cancelEditLoopCycle]);
 
+  const commitAndFinishEditing = React.useCallback(async () => {
+    if (!editingCueId) return;
+
+    try {
+      await cueEditorRef.current?.commit();
+
+      finishEditing();
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Could not save the current subtitle edit.",
+      );
+    }
+  }, [editingCueId, finishEditing]);
+
   const toggleEditLoop = React.useCallback(() => {
     setEditLoopEnabled((enabled) => {
       const next = !enabled;
 
       if (!next) {
         cancelEditLoopCycle();
+
         if (editingCueId) audioRef.current?.pause();
       }
 
@@ -624,19 +880,27 @@ export function AudioPlayerPage() {
   }, [cancelEditLoopCycle, editingCueId]);
 
   // const cycleRate = () => {
+
   //   const rates = [0.5, 0.8, 1, 1.25, 1.5, 2];
+
   //   const next = rates[(rates.indexOf(rate) + 1) % rates.length];
+
   //   setRate(next);
+
   //   if (audioRef.current) audioRef.current.playbackRate = next;
+
   // };
 
   const cycleRateInc = () => {
     const rates = [
       0.4, 0.5, 0.6, 0.8, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3,
     ];
+
     const next = rates[rates.indexOf(rate) + 1];
+
     if (next) {
       setRate(next);
+
       if (audioRef.current) audioRef.current.playbackRate = next;
     }
   };
@@ -645,22 +909,31 @@ export function AudioPlayerPage() {
     const rates = [
       0.4, 0.5, 0.6, 0.8, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3,
     ];
+
     const prev = rates[rates.indexOf(rate) - 1];
+
     if (prev) {
       setRate(prev);
+
       if (audioRef.current) audioRef.current.playbackRate = prev;
     }
   };
 
   const saveOffline = async () => {
     if (!file || !job) return;
+
     setOfflineSaving(true);
+
     try {
       await saveFileForOffline(file, job);
+
       const cached = await getOfflineBundle(file.id);
+
       if (!cached?.file.audioBlob.size)
         throw new Error("Offline audio verification failed.");
+
       setOfflineBundle(cached);
+
       toast.success("Audio, cleaned text and edited text saved offline.");
     } catch (error) {
       toast.error(
@@ -675,21 +948,249 @@ export function AudioPlayerPage() {
     const text = cues.length
       ? cuesToPlainText(cues, edits)
       : offlineBundle?.editedText || cleanedText;
+
     if (!text) return;
+
     downloadTextFile(text, transcriptDownloadName(sourceName));
   };
+
+  const jumpTranscriptCue = React.useCallback(
+    (direction: -1 | 1) => {
+      if (!cues.length) return;
+
+      const baseIndex = activeIndex >= 0 ? activeIndex : 0;
+
+      const targetIndex = Math.max(
+        0,
+
+        Math.min(cues.length - 1, baseIndex + direction),
+      );
+
+      if (targetIndex === baseIndex && activeIndex >= 0) return;
+
+      activateCueForPlayback(cues[targetIndex]);
+    },
+
+    [activeIndex, activateCueForPlayback, cues],
+  );
+
+  React.useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const editable = isEditableTarget(event.target);
+
+      const primaryModifier = event.ctrlKey || event.metaKey;
+
+      if (event.key === "Escape" && shortcutsOpen) {
+        event.preventDefault();
+
+        setShortcutsOpen(false);
+
+        return;
+      }
+
+      // Enter has two roles:
+      // - normal player mode: edit the currently active cue
+      // - edit mode: save the edit and exit
+      // Shift+Enter remains available for inserting a newline.
+      if (
+        event.key === "Enter" &&
+        !event.shiftKey &&
+        !primaryModifier &&
+        !event.altKey
+      ) {
+        if (editingCueId) {
+          event.preventDefault();
+          void commitAndFinishEditing();
+          return;
+        }
+
+        if (!editable && activeCue && !event.repeat) {
+          event.preventDefault();
+          void startEditing(activeCue);
+          return;
+        }
+      }
+
+      // Do not hijack normal typing/navigation while an input or the cue editor
+
+      // has focus. The Enter exception above is the only editing shortcut.
+
+      if (editable) return;
+
+      if (
+        primaryModifier &&
+        event.shiftKey &&
+        event.key.toLowerCase() === "s"
+      ) {
+        event.preventDefault();
+
+        if (!offlineSaving && file && job) void saveOffline();
+
+        return;
+      }
+
+      if (
+        primaryModifier &&
+        event.shiftKey &&
+        event.key.toLowerCase() === "d"
+      ) {
+        event.preventDefault();
+
+        downloadEdited();
+
+        return;
+      }
+
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+
+        seekBy(primaryModifier ? -30 : -5);
+
+        return;
+      }
+
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+
+        seekBy(primaryModifier ? 30 : 5);
+
+        return;
+      }
+
+      if (primaryModifier || event.altKey) return;
+
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+
+        jumpTranscriptCue(-1);
+
+        return;
+      }
+
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+
+        jumpTranscriptCue(1);
+
+        return;
+      }
+
+      if (event.code === "Space") {
+        event.preventDefault();
+
+        if (!event.repeat) void toggle();
+
+        return;
+      }
+
+      // if (event.key.toLowerCase() === "e") {
+      //   if (!event.repeat && activeCue) {
+      //     event.preventDefault();
+
+      //     void startEditing(activeCue);
+      //   }
+
+      //   return;
+      // }
+
+      if (event.key.toLowerCase() === "l") {
+        if (!event.repeat) {
+          event.preventDefault();
+
+          toggleEditLoop();
+        }
+
+        return;
+      }
+
+      // if (event.code === "BracketLeft") {
+      //   event.preventDefault();
+
+      //   cycleRateDec();
+
+      //   return;
+      // }
+
+      // if (event.code === "BracketRight") {
+      //   event.preventDefault();
+
+      //   cycleRateInc();
+      // }
+
+      if (event.key === "-") {
+        event.preventDefault();
+
+        cycleRateDec();
+
+        return;
+      }
+
+      if (event.key === "=") {
+        event.preventDefault();
+
+        cycleRateInc();
+
+        return;
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    activeCue,
+
+    cleanedText,
+
+    commitAndFinishEditing,
+
+    cues,
+
+    downloadEdited,
+
+    duration,
+
+    edits,
+
+    editingCueId,
+
+    file,
+
+    job,
+
+    jumpTranscriptCue,
+
+    offlineBundle,
+
+    offlineSaving,
+
+    rate,
+
+    shortcutsOpen,
+
+    sourceName,
+
+    startEditing,
+
+    toggleEditLoop,
+  ]);
 
   const handleAudioError = () => {
     if (!useOfflineAudio && offlineAudioUrl) {
       setUseOfflineAudio(true);
+
       toast.info("Server audio unavailable. Switched to the offline copy.");
+
       return;
     }
+
     toast.error("Audio is not available on this device.");
   };
 
   const activeText = activeCue ? cueDisplayText(activeCue, edits) : "";
+
   const previousText = previousCue ? cueDisplayText(previousCue, edits) : "";
+
   const nextText = nextCue ? cueDisplayText(nextCue, edits) : "";
 
   return (
@@ -701,18 +1202,22 @@ export function AudioPlayerPage() {
               <ArrowLeftIcon />
             </Link>
           </Button>
+
           <div className="min-w-0 flex-1">
             <h1 className="truncate text-base font-semibold">{sourceName}</h1>
+
             <div className="mt-1 flex flex-wrap items-center gap-2">
               <p className="text-muted-foreground text-xs">
                 Audio & synchronized transcript
               </p>
+
               {useOfflineAudio ? (
                 <Badge variant="secondary">
                   <WifiOffIcon />
                   Offline
                 </Badge>
               ) : null}
+
               {offlineBundle && !useOfflineAudio ? (
                 <Badge variant="outline">
                   <CheckIcon />
@@ -721,6 +1226,53 @@ export function AudioPlayerPage() {
               ) : null}
             </div>
           </div>
+
+          <div className="relative">
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Keyboard shortcuts"
+              aria-expanded={shortcutsOpen}
+              title="Keyboard shortcuts"
+              onClick={() => setShortcutsOpen((open) => !open)}
+            >
+              <KeyboardIcon />
+            </Button>
+
+            {shortcutsOpen ? (
+              <div
+                className="absolute right-0 top-full z-50 mt-2 w-[min(22rem,calc(100vw-2rem))] rounded-xl border bg-popover p-3 text-popover-foreground shadow-lg"
+                role="dialog"
+                aria-label="Audio player keyboard shortcuts"
+              >
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold">Keyboard shortcuts</p>
+
+                  <span className="text-muted-foreground text-[11px]">
+                    Esc to close
+                  </span>
+                </div>
+
+                <div className="space-y-1.5">
+                  {PLAYER_SHORTCUTS.map(([keys, description]) => (
+                    <div
+                      key={keys}
+                      className="flex items-center justify-between gap-4 rounded-lg px-1 py-1 text-xs"
+                    >
+                      <span className="text-muted-foreground">
+                        {description}
+                      </span>
+
+                      <kbd className="shrink-0 rounded border bg-muted px-1.5 py-0.5 font-mono text-[10px]">
+                        {keys}
+                      </kbd>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+
           {file && job?.status === "completed" && !offlineBundle ? (
             <Button
               variant="outline"
@@ -729,9 +1281,11 @@ export function AudioPlayerPage() {
               onClick={() => void saveOffline()}
             >
               <DownloadIcon />
+
               {offlineSaving ? "Saving…" : "Save offline"}
             </Button>
           ) : null}
+
           <Button
             variant="outline"
             size="sm"
@@ -755,13 +1309,20 @@ export function AudioPlayerPage() {
                   <p className="persian-content text-muted-foreground/55 min-h-12 text-center text-base transition-opacity sm:text-lg">
                     {previousText}
                   </p>
+
                   <button
                     type="button"
                     className="persian-content mx-auto block w-full text-center text-xl font-semibold leading-9 transition-colors hover:text-primary sm:text-2xl"
-                    onClick={() => activeCue && startEditing(activeCue)}
+                    onClick={() =>
+                      activeCue && activateCueForPlayback(activeCue)
+                    }
+                    onDoubleClick={() =>
+                      activeCue && void startEditing(activeCue)
+                    }
                   >
                     {activeText || cueDisplayText(cues[0], edits)}
                   </button>
+
                   <p className="persian-content text-muted-foreground/55 min-h-12 text-center text-base transition-opacity sm:text-lg">
                     {nextText}
                   </p>
@@ -814,6 +1375,7 @@ export function AudioPlayerPage() {
               }
               onPlay={() => {
                 loopPauseRef.current = false;
+
                 setPlaying(true);
               }}
               onPause={() => {
@@ -832,8 +1394,10 @@ export function AudioPlayerPage() {
                 onValueChange={([value]) => seekTo(value)}
                 aria-label="Audio position"
               />
+
               <div className="text-muted-foreground flex justify-between text-xs tabular-nums">
                 <span>{formatDuration(currentTime)}</span>
+
                 <span>{formatDuration(duration)}</span>
               </div>
 
@@ -842,10 +1406,11 @@ export function AudioPlayerPage() {
                   variant="ghost"
                   size="icon"
                   onClick={() => seekBy(-5)}
-                  aria-label="Back 10 seconds"
+                  aria-label="Back 5 seconds"
                 >
                   <RotateCcwIcon />
                 </Button>
+
                 <Button
                   size="icon-lg"
                   className="size-14 rounded-full"
@@ -858,11 +1423,12 @@ export function AudioPlayerPage() {
                     <PlayIcon className="ml-0.5 size-6" />
                   )}
                 </Button>
+
                 <Button
                   variant="ghost"
                   size="icon"
                   onClick={() => seekBy(5)}
-                  aria-label="Forward 10 seconds"
+                  aria-label="Forward 5 seconds"
                 >
                   <RotateCwIcon />
                 </Button>
@@ -871,7 +1437,9 @@ export function AudioPlayerPage() {
                   <Button variant="ghost" size="icon-sm" onClick={cycleRateDec}>
                     <MinusIcon className="size-3" />
                   </Button>
+
                   <p className="text-sm w-8 text-center">{rate}×</p>
+
                   <Button variant="ghost" size="icon-sm" onClick={cycleRateInc}>
                     <PlusIcon className="size-3" />
                   </Button>
@@ -886,6 +1454,7 @@ export function AudioPlayerPage() {
                   title="Loop the subtitle audio while editing"
                 >
                   <Repeat2Icon />
+
                   <span className="hidden sm:inline">Edit loop</span>
                 </Button>
               </div>
@@ -895,16 +1464,18 @@ export function AudioPlayerPage() {
           <aside className="hidden min-h-0 overflow-hidden rounded-2xl border bg-card lg:flex lg:flex-col">
             <div className="border-b px-5 py-4">
               <h2 className="text-sm font-semibold">Transcript</h2>
+
               <p className="text-muted-foreground mt-1 text-xs">
-                Click a sentence to seek. Only a nearby cue window is rendered
-                for speed on long recordings.
+                Click a sentence to seek and play. Double-click to edit. Only a
+                nearby cue window is rendered for speed on long recordings.
               </p>
             </div>
+
             <TranscriptPane
               cues={cues}
               edits={edits}
               activeIndex={activeIndex}
-              onSeek={seekTo}
+              onActivate={activateCueForPlayback}
               onEdit={startEditing}
             />
           </aside>
