@@ -4,7 +4,11 @@ using System.Text.Json;
 
 namespace PersianSTT.Launcher;
 
-internal sealed record VirtualizationState(bool? FirmwareEnabled, bool? Slat, bool? VmMonitor);
+internal sealed record VirtualizationState(
+    bool HypervisorPresent,
+    bool? FirmwareEnabled,
+    bool? Slat,
+    bool? VmMonitor);
 internal sealed record NetworkState(bool GhcrReachable, bool DockerDownloadReachable)
 {
     public bool Ready => GhcrReachable && DockerDownloadReachable;
@@ -47,29 +51,35 @@ internal static class SystemChecks
     public static async Task<VirtualizationState> GetVirtualizationStateAsync()
     {
         const string script =
-            "$p=Get-CimInstance Win32_Processor | Select-Object -First 1 " +
-            "VirtualizationFirmwareEnabled,SecondLevelAddressTranslationExtensions,VMMonitorModeExtensions;" +
-            "$p | ConvertTo-Json -Compress";
+            "$cpu=Get-CimInstance Win32_Processor | Select-Object -First 1;" +
+            "$cs=Get-CimInstance Win32_ComputerSystem;" +
+            "[pscustomobject]@{" +
+            "HypervisorPresent=[bool]$cs.HypervisorPresent;" +
+            "VirtualizationFirmwareEnabled=$cpu.VirtualizationFirmwareEnabled;" +
+            "SecondLevelAddressTranslationExtensions=$cpu.SecondLevelAddressTranslationExtensions;" +
+            "VMMonitorModeExtensions=$cpu.VMMonitorModeExtensions" +
+            "} | ConvertTo-Json -Compress";
 
         var result = await CommandRunner.RunAsync(
             "powershell.exe",
             new[] { "-NoProfile", "-NonInteractive", "-Command", script });
 
         if (!result.Success || string.IsNullOrWhiteSpace(result.StdOut))
-            return new VirtualizationState(null, null, null);
+            return new VirtualizationState(false, null, null, null);
 
         try
         {
             using var json = JsonDocument.Parse(result.StdOut.Trim());
             var root = json.RootElement;
             return new VirtualizationState(
+                ReadBool(root, "HypervisorPresent"),
                 ReadNullableBool(root, "VirtualizationFirmwareEnabled"),
                 ReadNullableBool(root, "SecondLevelAddressTranslationExtensions"),
                 ReadNullableBool(root, "VMMonitorModeExtensions"));
         }
         catch
         {
-            return new VirtualizationState(null, null, null);
+            return new VirtualizationState(false, null, null, null);
         }
     }
 
@@ -77,6 +87,11 @@ internal static class SystemChecks
     {
         var result = await CommandRunner.RunAsync("wsl.exe", new[] { "--version" });
         return result.Success && result.Combined.Contains("WSL", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ReadBool(JsonElement root, string name)
+    {
+        return root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.True;
     }
 
     private static bool? ReadNullableBool(JsonElement root, string name)

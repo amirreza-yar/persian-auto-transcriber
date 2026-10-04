@@ -175,15 +175,6 @@ internal sealed class MainForm : Form
             return;
         }
 
-        var virt = await SystemChecks.GetVirtualizationStateAsync();
-        if (virt.FirmwareEnabled == false || virt.Slat == false || virt.VmMonitor == false)
-        {
-            MessageBox.Show(this,
-                "Hardware virtualization is not available to Windows. The launcher can enable Windows features, but it cannot change BIOS/UEFI virtualization. Enable Intel VT-x/VT-d or AMD SVM in BIOS/UEFI, reboot, then try again.",
-                "Virtualization required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
         if (!await SystemChecks.IsWslModernAsync())
         {
             var answer = MessageBox.Show(this,
@@ -234,8 +225,15 @@ internal sealed class MainForm : Form
         _progress.MarqueeAnimationSpeed = 25;
         if (!await _dockerService.StartDesktopAndWaitAsync(TimeSpan.FromMinutes(2)))
         {
+            var virt = await SystemChecks.GetVirtualizationStateAsync();
+            var detail = virt.HypervisorPresent
+                ? "Windows hypervisor is active, so this is not a BIOS virtualization problem. Restart Windows if WSL/Virtual Machine Platform was just enabled, then press Setup / Repair again."
+                : virt.FirmwareEnabled == false
+                    ? "Windows currently reports CPU virtualization as unavailable. VT-d is not the setting Docker needs; check Intel Virtualization Technology / VT-x or AMD SVM. If Docker has worked on this PC before, restart Windows first because WSL/Virtual Machine Platform changes may still be pending."
+                    : "Docker Desktop is installed but its engine is not ready. Restart Windows if WSL/Virtual Machine Platform was just enabled, complete any Docker first-run prompt, then press Setup / Repair again.";
+
             MessageBox.Show(this,
-                "Docker Desktop is installed but the engine is not ready. If Windows or Docker asked for a restart/first-run confirmation, complete it and then press Setup / Repair again.",
+                detail,
                 "Docker not ready", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
@@ -401,10 +399,19 @@ internal sealed class MainForm : Form
                 network.Ready ? "Reachable" : "Connect system VPN for install/update/Gemini",
                 network.Ready ? Color.DarkGreen : Color.DarkOrange);
 
-            var virtGood = virt.FirmwareEnabled != false && virt.Slat != false && virt.VmMonitor != false;
-            var virtText = !virtGood ? "BIOS/UEFI virtualization required" : wsl ? "Ready" : "WSL setup required";
+            // Capability-first status: a running Docker engine is definitive proof that
+            // the virtualization stack is usable. Do not mark the machine as broken just
+            // because a CIM firmware flag is false/unknown while Hyper-V/WSL is active.
+            var platformReady = engine || virt.HypervisorPresent || wsl;
+            var virtText = engine
+                ? "Ready"
+                : wsl
+                    ? "WSL ready — Docker not running"
+                    : virt.HypervisorPresent
+                        ? "Hypervisor ready — WSL setup required"
+                        : "WSL setup required";
             SetStatus(_virtualization, virtText,
-                !virtGood ? Color.Firebrick : wsl ? Color.DarkGreen : Color.DarkOrange);
+                platformReady ? (wsl || engine ? Color.DarkGreen : Color.DarkOrange) : Color.DarkOrange);
 
             SetStatus(_docker,
                 !cli ? "Not installed" : engine ? "Running" : "Installed, not running",
