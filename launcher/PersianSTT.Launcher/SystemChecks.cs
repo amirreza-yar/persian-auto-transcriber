@@ -85,8 +85,33 @@ internal static class SystemChecks
 
     public static async Task<bool> IsWslModernAsync()
     {
-        var result = await CommandRunner.RunAsync("wsl.exe", new[] { "--version" });
-        return result.Success && result.Combined.Contains("WSL", StringComparison.OrdinalIgnoreCase);
+        // Do not inspect the text emitted by `wsl --version`. wsl.exe can emit
+        // localized output and, when redirected, some Windows/WSL versions can
+        // produce text that is captured with unexpected encoding/null bytes.
+        // The old implementation therefore reported "WSL setup required" even
+        // when a current WSL installation was present.
+        //
+        // A successful `wsl --version` is the capability check we need here.
+        // Older inbox WSL builds that do not support --version will fail and are
+        // correctly sent through Setup / Repair, where `wsl --update` is run.
+        try
+        {
+            var wslPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.System),
+                "wsl.exe");
+
+            if (!File.Exists(wslPath)) return false;
+
+            var result = await CommandRunner.RunAsync(
+                wslPath,
+                new[] { "--version" });
+
+            return result.Success;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static bool ReadBool(JsonElement root, string name)
