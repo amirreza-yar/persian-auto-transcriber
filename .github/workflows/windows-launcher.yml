@@ -1,0 +1,58 @@
+name: Build Windows launcher
+
+on:
+  push:
+    branches: [master]
+    tags:
+      - "v*"
+    paths:
+      - "launcher/**"
+      - ".github/workflows/windows-launcher.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Publish single-file launcher
+        shell: pwsh
+        run: |
+          dotnet publish launcher/PersianSTT.Launcher/PersianSTT.Launcher.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -o launcher-publish
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PersianSTT-Windows
+          path: launcher-publish/PersianSTT.exe
+          if-no-files-found: error
+
+      - name: Attach launcher to tagged GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title $tag --generate-notes
+          }
+          gh release upload $tag launcher-publish/PersianSTT.exe --clobber
